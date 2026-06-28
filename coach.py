@@ -118,19 +118,25 @@ def _wrap(text, width, indent):
 
 
 def windows_summary(usage):
-    """표시용 윈도우 목록 -> [(name, leftPct, mins)]. 무효 스킵, 중복(동일 daily) 묶음."""
-    rows, seen = [], set()
+    """표시용 윈도우 목록 -> [(name, leftPct, mins)]. 무효 스킵.
+
+    같은 windowMinutes가 여러 개 오면(예: Claude 주간+Sonnet 주간+Daily, codexbar가
+    모델·기능별 하위 한도를 같은 7일로 줌) **가장 빡빡한(left 최소) 1개로 통합**한다.
+    제일 적게 남은 게 먼저 막히는 병목 → render·to_payload·classify(pick)가 같은
+    윈도우를 보게 해 중복 표시·불일치를 없앤다. (동일값 중복도 자연히 1개로 묶임.)"""
+    best, order = {}, []   # wm -> 가장 빡빡한 r, wm 첫 등장 순서
     for k in ("primary", "secondary", "tertiary"):
         r = win(usage.get(k))
         if not r:
             continue
-        reset_key = None if r["mins"] is None else round(r["mins"])
-        key = (r["wm"], round(r["left"] * 100), reset_key)
-        if key in seen:        # gemini Flash/Flash Lite 동일값 중복 제거
-            continue
-        seen.add(key)
-        rows.append((WIN_NAME.get(r["wm"], f"{r['wm']}분"), round(r["left"] * 100), r["mins"]))
-    return rows
+        wm = r["wm"]
+        if wm not in best:
+            order.append(wm)
+            best[wm] = r
+        elif r["left"] < best[wm]["left"]:
+            best[wm] = r
+    return [(WIN_NAME.get(wm, f"{wm}분"), round(best[wm]["left"] * 100), best[wm]["mins"])
+            for wm in order]
 
 
 def now_utc():
@@ -166,12 +172,14 @@ def win(w):
 
 
 def pick(usage, minutes):
-    """windowMinutes로 윈도우 선택 (primary/secondary/tertiary 순회, 첫 유효값)."""
+    """windowMinutes로 윈도우 선택 — 같은 wm 여러 개면 가장 빡빡한(left 최소) 1개.
+    windows_summary와 같은 기준이라 render·json·classify가 동일 윈도우를 본다."""
+    best = None
     for k in ("primary", "secondary", "tertiary"):
         r = win(usage.get(k))
-        if r and r["wm"] == minutes:
-            return r
-    return None
+        if r and r["wm"] == minutes and (best is None or r["left"] < best["left"]):
+            best = r
+    return best
 
 
 def classify(provider, usage):
