@@ -1,0 +1,57 @@
+[
+  {
+    "provider" : "claude",
+    "source" : "web",
+    "usage" : {
+      "accountEmail" : "user@example.com",
+      "accountOrganization" : "user@example.com's Organization",
+      "extraRateWindows" : [
+        {
+          "id" : "claude-design",
+          "title" : "Designs",
+          "window" : {
+            "usedPercent" : 0,
+            "windowMinutes" : 10080
+          }
+        },
+        {
+          "id" : "claude-routines",
+          "title" : "Daily Routines",
+          "window" : {
+            "usedPercent" : 0,
+            "windowMinutes" : 10080
+          }
+        }
+      ],
+      "identity" : {
+        "accountEmail" : "user@example.com",
+        "accountOrganization" : "user@example.com's Organization",
+        "loginMethod" : "Claude Pro",
+        "providerID" : "claude"
+      },
+      "loginMethod" : "Claude Pro",
+      "primary" : {
+        "resetDescription" : "Jun 25 at 11:49PM",
+        "resetsAt" : "2026-06-25T14:49:59Z",
+        "usedPercent" : 18,
+        "windowMinutes" : 300
+      },
+      "providerCost" : {
+        "currencyCode" : "USD",
+        "limit" : 50,
+        "period" : "Monthly",
+        "updatedAt" : "2026-06-25T10:19:14Z",
+        "used" : 0
+      },
+      "secondary" : {
+        "resetDescription" : "Jun 30 at 3:59PM",
+        "resetsAt" : "2026-06-30T06:59:59Z",
+        "usedPercent" : 35,
+        "windowMinutes" : 10080
+      },
+      "tertiary" : null,
+      "updatedAt" : "2026-06-25T10:19:14Z"
+    },
+    "version" : "2.1.191"
+  }
+]

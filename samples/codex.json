@@ -1,0 +1,37 @@
+[
+  {
+    "credits" : {
+      "events" : [
+
+      ],
+      "remaining" : 0,
+      "updatedAt" : "2026-06-25T10:19:44Z"
+    },
+    "provider" : "codex",
+    "source" : "codex-cli",
+    "usage" : {
+      "accountEmail" : "user@example.com",
+      "identity" : {
+        "accountEmail" : "user@example.com",
+        "loginMethod" : "plus",
+        "providerID" : "codex"
+      },
+      "loginMethod" : "plus",
+      "primary" : {
+        "resetDescription" : "오후 7:33",
+        "resetsAt" : "2026-06-25T10:33:01Z",
+        "usedPercent" : 10,
+        "windowMinutes" : 300
+      },
+      "secondary" : {
+        "resetDescription" : "2026년 6월 28일 오전 12:42",
+        "resetsAt" : "2026-06-27T15:42:03Z",
+        "usedPercent" : 55,
+        "windowMinutes" : 10080
+      },
+      "tertiary" : null,
+      "updatedAt" : "2026-06-25T10:19:44Z"
+    },
+    "version" : "0.142.0"
+  }
+]

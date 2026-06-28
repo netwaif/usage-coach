@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs / temp
+*.log
+*.tmp
+
+# 런타임 캐시 — 로컬 경로·UUID 포함, git 추적 안 함
+cache/
+
+# MultiAgent 작업 데이터·교훈 폴더 — usage-coach 도구와 무관, 통째로 미추적
+tasks/
+_local/
+
+# MultiAgent 오케스트레이션 프레임워크 — usage-coach 도구 repo엔 미포함(로컬 전용).
+# 이 폴더에서 멀티에이전트로 작업하려고 깐 것이지 도구 산출물이 아님.
+.claude/
+.mcp.json
+CLAUDE.md
+_shared/
+_templates/
+assets/
+# MultiAgent 보일러플레이트 문서(usage-coach 것 아님).
+NOTICE
+CHANGELOG.md
+KNOWN_ISSUES.md
+
+# 내부 개발/핸드오프 문서 — 공개 repo에 미포함(로컬 전용).
+START.md
+HANDOFF.md
