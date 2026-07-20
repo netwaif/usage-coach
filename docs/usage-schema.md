@@ -23,7 +23,7 @@ codexbar usage --provider gemini --source api --format json --pretty
     "primary":   { "usedPercent": N, "windowMinutes": M, "resetsAt": "ISO8601Z", "resetDescription": "..." },
     "secondary": { ... } | null,
     "tertiary":  { ... } | null,
-    "extraRateWindows": [ { "id","title","window":{usedPercent,windowMinutes} } ],  // claude만
+    "extraRateWindows": [ { "id","title","window":{usedPercent,windowMinutes} } ],  // claude만. Max 구독은 "Fable only"(id=claude-weekly-scoped-fable, 7일) 포함 — coach가 표시 전용 라인으로 노출(판정 미반영). 기본 구독엔 없음
     "providerCost": { "limit","used","currencyCode","period" },                      // claude
     "updatedAt": "ISO8601Z"
   },

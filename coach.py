@@ -43,6 +43,8 @@ _COLORS = {"🔴": "31", "🟢": "32", "⏳": "36", "🟡": "33", "⚪": "37"}
 PROV_COLOR = {"claude": "33", "codex": "36", "antigravity": "35"}
 # windowMinutes -> 표시 이름
 WIN_NAME = {300: "5시간", 10080: "7일", 1440: "일일"}
+# Max 구독 전용 Fable 5 주간 한도의 extraRateWindows id (기본 구독 페이로드엔 없음)
+FABLE_WIN_ID = "claude-weekly-scoped-fable"
 
 
 def _use_color():
@@ -137,6 +139,21 @@ def windows_summary(usage):
             best[wm] = r
     return [(WIN_NAME.get(wm, f"{wm}분"), round(best[wm]["left"] * 100), best[wm]["mins"])
             for wm in order]
+
+
+def fable_window(usage):
+    """extraRateWindows의 Fable 5 전용 주간 한도 -> (name, leftPct, mins) or None.
+
+    표시 전용 — classify(pick)·guard 판정에는 넣지 않는다(전체 주간 기준 유지).
+    기본 구독 페이로드엔 항목 자체가 없다 → None(라인 조용히 생략). id로만 식별해
+    Daily Routines 등 다른 extra 윈도우를 오인하지 않는다. 무효 윈도우는 win()이 스킵.
+    """
+    for e in usage.get("extraRateWindows") or []:
+        if isinstance(e, dict) and e.get("id") == FABLE_WIN_ID:
+            r = win(e.get("window"))
+            if r:
+                return ("Fable", round(r["left"] * 100), r["mins"])
+    return None
 
 
 def now_utc():
@@ -332,7 +349,7 @@ def render(results):
 
 # emoji -> 안정적 level 문자열 / 윈도우 이름 -> JSON 키 (agent loop이 분기에 사용)
 _LEVEL = {"🔴": "red", "🟢": "green", "⏳": "wait", "🟡": "yellow", "⚪": "white"}
-_WKEY = {"5시간": "5h", "7일": "7d", "일일": "daily"}
+_WKEY = {"5시간": "5h", "7일": "7d", "일일": "daily", "Fable": "fable_7d"}
 
 
 def to_payload(results):
@@ -349,7 +366,8 @@ def to_payload(results):
             "level": _LEVEL.get(r["emoji"]),     # 코칭 불가 시 null
             "action": r["action"],               # 권장 작업 크기 (전문)
             "reason": r["detail"],               # 이유·타이밍 (전문, 그대로)
-            "windows": {_WKEY.get(n, n): {"left_pct": p, "reset_min": round(m)}
+            "windows": {_WKEY.get(n, n): {"left_pct": p,
+                                          "reset_min": None if m is None else round(m)}
                         for n, p, m in r["windows"]},
         }
     return {"ts": now_utc().strftime("%Y-%m-%dT%H:%M:%SZ"), "providers": provs}
@@ -371,11 +389,15 @@ def gather(sources):
         try:
             usage = load_usage(kind, arg)
             emoji, action, detail = classify(label, usage)
+            wins = windows_summary(usage)
+            fable = fable_window(usage)
+            if fable:
+                wins.append(fable)     # 표시 전용 추가 — classify에는 미반영
             results.append({
                 "label": label, "ok": True,
                 "email": usage.get("accountEmail"),
                 "plan": usage.get("loginMethod"),
-                "windows": windows_summary(usage),
+                "windows": wins,
                 "emoji": emoji, "action": action, "detail": detail,
             })
         except subprocess.TimeoutExpired:

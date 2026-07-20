@@ -1,0 +1,74 @@
+[
+    {
+        "pace": {
+            "primary": {
+                "deltaPercent": -52,
+                "expectedUsedPercent": 57,
+                "stage": "farBehind",
+                "summary": "52% in reserve | Expected 57% used | Lasts until reset",
+                "willLastToReset": true
+            },
+            "secondary": {
+                "deltaPercent": -33,
+                "expectedUsedPercent": 87,
+                "stage": "farBehind",
+                "summary": "33% in reserve | Expected 87% used | Lasts until reset",
+                "willLastToReset": true
+            }
+        },
+        "provider": "claude",
+        "source": "web",
+        "usage": {
+            "accountEmail": "user@example.com",
+            "accountOrganization": "user@example.com's Organization",
+            "extraRateWindows": [
+                {
+                    "id": "claude-routines",
+                    "title": "Daily Routines",
+                    "window": {
+                        "usedPercent": 0,
+                        "windowMinutes": 10080
+                    }
+                },
+                {
+                    "id": "claude-weekly-scoped-fable",
+                    "title": "Fable only",
+                    "window": {
+                        "resetsAt": "2026-07-21T07:00:00Z",
+                        "usedPercent": 73,
+                        "windowMinutes": 10080
+                    }
+                }
+            ],
+            "identity": {
+                "accountEmail": "user@example.com",
+                "accountOrganization": "user@example.com's Organization",
+                "loginMethod": "Claude Max 5x",
+                "providerID": "claude"
+            },
+            "loginMethod": "Claude Max 5x",
+            "primary": {
+                "resetDescription": "Jul 20 at 8:10PM",
+                "resetsAt": "2026-07-20T11:10:00Z",
+                "usedPercent": 5,
+                "windowMinutes": 300
+            },
+            "providerCost": {
+                "currencyCode": "USD",
+                "limit": 50,
+                "period": "Monthly cap",
+                "updatedAt": "2026-07-20T09:01:54Z",
+                "used": 0
+            },
+            "secondary": {
+                "resetDescription": "Jul 21 at 4:00PM",
+                "resetsAt": "2026-07-21T07:00:00Z",
+                "usedPercent": 54,
+                "windowMinutes": 10080
+            },
+            "tertiary": null,
+            "updatedAt": "2026-07-20T09:01:54Z"
+        },
+        "version": "2.1.215"
+    }
+]
