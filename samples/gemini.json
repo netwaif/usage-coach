@@ -1,33 +1,28 @@
 [
   {
-    "provider" : "gemini",
+    "provider" : "antigravity",
     "source" : "api",
     "usage" : {
       "accountEmail" : "user@example.com",
       "identity" : {
         "accountEmail" : "user@example.com",
         "loginMethod" : "Free",
-        "providerID" : "gemini"
+        "providerID" : "antigravity"
       },
       "loginMethod" : "Free",
       "primary" : {
-        "resetDescription" : "Resets soon",
-        "resetsAt" : "1970-01-01T00:00:00Z",
-        "usedPercent" : 100,
-        "windowMinutes" : 1440
+        "resetDescription" : "Resets in 6d 23h",
+        "resetsAt" : "2026-07-02T10:20:24Z",
+        "usedPercent" : 33,
+        "windowMinutes" : 10080
       },
       "secondary" : {
-        "resetDescription" : "Resets in 23h 59m",
-        "resetsAt" : "2026-06-26T10:20:24Z",
+        "resetDescription" : "Resets in 6d 23h",
+        "resetsAt" : "2026-07-02T10:20:24Z",
         "usedPercent" : 0,
-        "windowMinutes" : 1440
+        "windowMinutes" : 10080
       },
-      "tertiary" : {
-        "resetDescription" : "Resets in 23h 59m",
-        "resetsAt" : "2026-06-26T10:20:24Z",
-        "usedPercent" : 0,
-        "windowMinutes" : 1440
-      },
+      "tertiary" : null,
       "updatedAt" : "2026-06-25T10:20:24Z"
     }
   }
