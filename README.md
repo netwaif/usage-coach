@@ -43,6 +43,7 @@ coach --providers claude,codex           # 특정 provider만
 coach --once                             # 한 번만 찍고 종료
 coach --mock all                         # 출력 5종 데모(모킹)
 coach --file samples/claude.json:claude  # JSON 파일에서 읽기
+coach --account antigravity:foo@gmail.com  # 계정 지정(codexbar --account 패스스루, 반복 가능)
 coach --json                             # 머신 출력(JSON 1줄) — 에이전트 루프용
 ```
 
@@ -57,6 +58,22 @@ codexbar 제약: `--provider all`은 hang하므로 provider별로 따로 조회�
 - `coach guard on|off|status` — 런타임 스위치.
 
 판정 = 하이브리드 OR: `left < timeLeft − m`(페이스) **또는** `left < floor`(절대). 데이터 오류 시 fail-open(통과). 설정 = `~/.config/usage-coach/guard.json` (provider별 `m`/`floor`, 기본 0.10/0.10).
+
+## 디스코드 대시보드 (`discord_dash.py`)
+
+coach 출력을 PNG 게이지 카드로 렌더해 디스코드 웹훅 메시지 하나를 **계속 편집**하는 라이브 대시보드. 채널을 열면 항상 최신 카드가 보인다.
+
+- 카드 구성 = provider별 도넛 게이지(주 윈도우) + 보조 윈도우 바 + **코칭 문구(action·reason 전문)** + 리셋 카운트다운.
+- level이 🟡/🔴로 **나빠지는 순간에만** 새 메시지를 게시해 푸시 알림을 울린다(평소 편집은 무알림).
+- 이 스크립트만 [Pillow](https://python-pillow.org) 필요(coach 본체는 여전히 무의존성). 한글 폰트는 macOS 내장 AppleSDGothicNeo 사용.
+
+```bash
+python3 discord_dash.py --out card.png      # 렌더만(웹훅 미사용, 검증용)
+python3 discord_dash.py --mock all --out c.png
+python3 discord_dash.py                     # 조회→렌더→웹훅 업서트(+악화 핑)
+```
+
+설정: `~/.config/usage-coach/discord.json`에 `{"webhook_url": "..."}` (또는 env `DISCORD_WEBHOOK_URL`). 같은 파일의 `"coach_args": ["--account", "antigravity:foo@gmail.com"]`로 대시보드가 추적할 계정을 고정할 수 있다(카드에 계정 이메일 표시됨). 여러 계정을 오가는 provider는 `"all_accounts"`(기본 `["antigravity"]`)에 넣으면 codexbar `--all-accounts`로 **등록된 전 계정을 계정별 바로 표시**하고, 코칭·본문·핑은 가장 여유 있는 계정 기준으로 잡는다(끄려면 `"all_accounts": []`). 상태(메시지 ID·직전 level)는 `discord-state.json`에 저장. 주기 실행은 LaunchAgent 등으로 5분 간격 권장(웹훅만 쓰므로 봇 토큰·gateway 불필요).
 
 ## 라이선스
 
