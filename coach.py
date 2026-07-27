@@ -13,6 +13,8 @@ import select
 import shutil
 import subprocess
 import sys
+import termios
+import tty
 import unicodedata
 
 # ── 튜닝 파라미터 (사용 패턴 따라 조정) ───────────────────────────────
@@ -36,6 +38,9 @@ LIVE_CMDS = {
     "codex":  ["codexbar", "usage", "--provider", "codex", "--source", "cli", "--format", "json"],
     "antigravity": ["codexbar", "usage", "--provider", "antigravity", "--format", "json"],
 }
+
+# --account PROVIDER:LABEL 오버라이드 → codexbar --account 패스스루 (main에서 채움)
+ACCOUNT_OVERRIDES = {}
 
 # ANSI 색 (emoji별). tty가 아니거나 NO_COLOR면 비활성.
 _COLORS = {"🔴": "31", "🟢": "32", "⏳": "36", "🟡": "33", "⚪": "37"}
@@ -265,6 +270,19 @@ def classify(provider, usage):
 
 
 # ── 입력 소스 ─────────────────────────────────────────────────────────
+def antigravity_gemini_only(usage):
+    """antigravity 2풀(Gemini=primary / Claude·GPT=secondary) 중 Gemini만 남긴다
+    — Claude·GPT 풀은 미사용이라 표시하면 소음. windowMinutes가 간헐적으로 빠진 채
+    오면 주간(10080)으로 보정한다(Antigravity 풀은 전부 Weekly Limit)."""
+    u = dict(usage)
+    p = u.get("primary")
+    if isinstance(p, dict) and p.get("usedPercent") is not None:
+        p = dict(p)
+        p.setdefault("windowMinutes", 10080)
+    u["primary"], u["secondary"], u["tertiary"] = p, None, None
+    return u
+
+
 def fetch_live(provider):
     """codexbar 라이브 조회 -> usage dict. 실패 시 예외.
 
@@ -272,12 +290,29 @@ def fetch_live(provider):
     못하게 별도 세션으로 실행 → Ctrl-C(SIGINT)가 codexbar에 먹히지 않고 watch가 정상 종료.
     stdin=DEVNULL: codexbar가 우리 입력을 읽지 않도록.
     """
-    out = subprocess.run(LIVE_CMDS[provider], capture_output=True, text=True,
+    cmd = list(LIVE_CMDS[provider])
+    if provider in ACCOUNT_OVERRIDES:
+        cmd += ["--account", ACCOUNT_OVERRIDES[provider]]
+    out = subprocess.run(cmd, capture_output=True, text=True,
                          timeout=40, start_new_session=True, stdin=subprocess.DEVNULL)
     if out.returncode != 0:
         raise RuntimeError((out.stderr or out.stdout or "조회 실패").strip().splitlines()[-1])
     data = json.loads(out.stdout)
-    return data[0]["usage"]
+    usage = data[0]["usage"]
+    return antigravity_gemini_only(usage) if provider == "antigravity" else usage
+
+
+def fetch_live_all(provider):
+    """codexbar --all-accounts -> 등록된 전 계정의 usage dict 리스트."""
+    cmd = list(LIVE_CMDS[provider]) + ["--all-accounts"]
+    out = subprocess.run(cmd, capture_output=True, text=True,
+                         timeout=120, start_new_session=True, stdin=subprocess.DEVNULL)
+    if out.returncode != 0:
+        raise RuntimeError((out.stderr or out.stdout or "조회 실패").strip().splitlines()[-1])
+    usages = [e.get("usage") or {} for e in json.loads(out.stdout)]
+    if provider == "antigravity":
+        usages = [antigravity_gemini_only(u) for u in usages]
+    return usages
 
 
 def load_file(path):
@@ -322,8 +357,13 @@ def render(results):
         code = PROV_COLOR.get(r["label"], "37")
         meta = "  ·  ".join(x for x in (r.get("email"), r.get("plan")) if x)
         b = [_row(_c(f"1;{code}", f" {name}"), _c("90", meta), W)]
+        wpad = max([5] + [_w(n) for n, _, _ in r["windows"]])
         for wname, pct, mins in r["windows"]:
-            left = f"   {_pad(wname, 5)} {_bar(pct / 100, code)}  {pct:>3}%"
+            if pct is None:            # 계정 행에서 미확인(윈도우 데이터 없음)
+                left = f"   {_pad(wname, wpad)} {_bar(0, code)}    —"
+                b.append(_row(left, _c("90", "미확인"), W))
+                continue
+            left = f"   {_pad(wname, wpad)} {_bar(pct / 100, code)}  {pct:>3}%"
             b.append(_row(left, _c("90", _reset(mins)), W))
         if r["emoji"]:
             b.append("   " + _paint(r["emoji"], f"{r['emoji']} {r['action']}"))
@@ -349,7 +389,7 @@ def render(results):
 
 # emoji -> 안정적 level 문자열 / 윈도우 이름 -> JSON 키 (agent loop이 분기에 사용)
 _LEVEL = {"🔴": "red", "🟢": "green", "⏳": "wait", "🟡": "yellow", "⚪": "white"}
-_WKEY = {"5시간": "5h", "7일": "7d", "일일": "daily", "Fable": "fable_7d"}
+_WKEY = {"5시간": "5h", "7일": "7d", "일일": "daily", "Fable": "fable_7d", "Gemini": "gemini"}
 
 
 def to_payload(results):
@@ -363,6 +403,7 @@ def to_payload(results):
         provs[r["label"]] = {
             "ok": True,
             "plan": r.get("plan"),
+            "email": r.get("email"),
             "level": _LEVEL.get(r["emoji"]),     # 코칭 불가 시 null
             "action": r["action"],               # 권장 작업 크기 (전문)
             "reason": r["detail"],               # 이유·타이밍 (전문, 그대로)
@@ -374,37 +415,73 @@ def to_payload(results):
 
 
 def load_usage(kind, arg):
-    """kind(live|file|mock) + arg -> usage dict. 실패 시 예외(호출부에서 처리)."""
-    if kind == "live":
+    """kind(live|live-all|file|mock) + arg -> usage dict. 실패 시 예외(호출부에서 처리).
+    live-all은 guard 등 단일 usage가 필요한 호출부에선 선택 계정 단일 조회로 축약."""
+    if kind in ("live", "live-all"):
         return fetch_live(arg)
     if kind == "file":
         return load_file(arg)
     return mock_usage(arg)
 
 
+def gather_all_accounts(label):
+    """전 계정을 한 블록으로: 행 = 계정(라벨 = 이메일 @ 앞부분), 코칭 = 최여유 계정 기준."""
+    order = {"🔴": 0, "🟡": 1, "⏳": 2, "⚪": 3, "🟢": 4}
+    accounts = []
+    for usage in fetch_live_all(label):
+        emoji, action, detail = classify(label, usage)
+        wins = windows_summary(usage)
+        pct, mins = (wins[0][1], wins[0][2]) if wins else (None, None)
+        accounts.append({"email": usage.get("accountEmail") or "?",
+                         "plan": usage.get("loginMethod"), "pct": pct, "mins": mins,
+                         "emoji": emoji, "action": action, "detail": detail})
+    if not accounts:
+        return {"label": label, "ok": False, "msg": "등록된 계정 없음"}
+    accounts.sort(key=lambda a: (-order.get(a["emoji"], -1),
+                                 -(a["pct"] if a["pct"] is not None else -1)))
+    best = accounts[0]
+    return {
+        "label": label, "ok": True,
+        "email": best["email"], "plan": best["plan"],
+        "windows": [(a["email"].split("@", 1)[0], a["pct"], a["mins"]) for a in accounts],
+        "emoji": best["emoji"], "action": best["action"], "detail": best["detail"],
+    }
+
+
+def gather_one(source):
+    """source(label, kind, arg) -> result dict 1개."""
+    label, kind, arg = source
+    try:
+        if kind == "live-all":
+            return gather_all_accounts(label)
+        usage = load_usage(kind, arg)
+        emoji, action, detail = classify(label, usage)
+        wins = windows_summary(usage)
+        if label == "antigravity":   # 2풀 중 Gemini만 표시 — 항목명도 실물대로
+            wins = [("Gemini", pv, mv) for _n, pv, mv in wins]
+        fable = fable_window(usage)
+        if fable:
+            wins.append(fable)     # 표시 전용 추가 — classify에는 미반영
+        return {
+            "label": label, "ok": True,
+            "email": usage.get("accountEmail"),
+            "plan": usage.get("loginMethod"),
+            "windows": wins,
+            "emoji": emoji, "action": action, "detail": detail,
+        }
+    except subprocess.TimeoutExpired:
+        return {"label": label, "ok": False, "msg": "조회 시간초과(hang?) — 건너뜀"}
+    except Exception as e:
+        return {"label": label, "ok": False, "msg": f"조회 실패: {e}"}
+
+
 def gather(sources):
-    """sources: list[(label, kind, arg)] -> results(dict) 리스트. kind: live|file|mock."""
-    results = []
-    for label, kind, arg in sources:
-        try:
-            usage = load_usage(kind, arg)
-            emoji, action, detail = classify(label, usage)
-            wins = windows_summary(usage)
-            fable = fable_window(usage)
-            if fable:
-                wins.append(fable)     # 표시 전용 추가 — classify에는 미반영
-            results.append({
-                "label": label, "ok": True,
-                "email": usage.get("accountEmail"),
-                "plan": usage.get("loginMethod"),
-                "windows": wins,
-                "emoji": emoji, "action": action, "detail": detail,
-            })
-        except subprocess.TimeoutExpired:
-            results.append({"label": label, "ok": False, "msg": "조회 시간초과(hang?) — 건너뜀"})
-        except Exception as e:
-            results.append({"label": label, "ok": False, "msg": f"조회 실패: {e}"})
-    return results
+    """sources: list[(label, kind, arg)] -> results(dict) 리스트. kind: live|live-all|file|mock.
+
+    순차 조회 고정 — codexbar는 동시 실행하면 잠금/행이 걸린다(실측: 병렬 2 인스턴스에서
+    hang·조회 실패, `--provider all` hang과 같은 계열). provider당 수십 초라 전체
+    45초~1분쯤 걸리지만 병렬화로 줄일 수 없는 codexbar 쪽 제약이다."""
+    return [gather_one(s) for s in sources]
 
 
 # ── 2부 요금가드 (command 훅 결정 모드) ───────────────────────────────
@@ -585,18 +662,37 @@ def run_watch(sources, interval):
     데이터 조회(gather)는 이전 화면이 그대로 떠 있는 상태에서 진행하고,
     새 데이터가 준비된 뒤에만 제자리 갱신 → 갱신 때 화면이 사라지지 않음.
     """
-    footer = f"\n  [{interval}초마다 자동 갱신 · Enter=지금 갱신 · q+Enter/Ctrl-C=종료]"
-    sys.stdout.write("\033[2J\033[H  사용량 불러오는 중...\033[J")   # 최초 1회만 빈 화면
+    is_tty = sys.stdin.isatty()
+    footer = (f"\n  [{interval}초마다 자동 갱신 · Enter=지금 갱신 · q/Ctrl-C=종료]" if is_tty
+              else f"\n  [{interval}초마다 자동 갱신 · Enter=지금 갱신 · q+Enter/Ctrl-C=종료]")
+    sys.stdout.write("\033[2J\033[H  사용량 불러오는 중... "
+                     "(codexbar를 provider별로 순차 조회해서 1분쯤 걸릴 수 있어요)\033[J")
     sys.stdout.flush()
+    old_attr = None
+    if is_tty:
+        # cbreak + 에코 off: Enter가 화면에 개행을 찍지 않고 바로 갱신 트리거가 된다
+        # (기존엔 canonical 모드라 에코된 개행이 커서만 내리고, 갱신 표시도 없어
+        #  동작 안 하는 것처럼 보였음). q는 Enter 없이 즉시 종료.
+        old_attr = termios.tcgetattr(sys.stdin.fileno())
+        tty.setcbreak(sys.stdin.fileno())
     try:
         while True:
             frame = render(gather(sources)) + footer   # 느린 조회 동안 이전 프레임 유지
             _draw(frame)
             r, _, _ = select.select([sys.stdin], [], [], interval)
-            if r and sys.stdin.readline().strip().lower() == "q":
-                break
+            if r:
+                if is_tty:
+                    keys = os.read(sys.stdin.fileno(), 1024)
+                    if b"q" in keys.lower():
+                        break
+                elif sys.stdin.readline().strip().lower() == "q":
+                    break
+            _draw(frame + _c("90", "  갱신 중..."))   # 조회 시작 즉시 진행 표시
     except KeyboardInterrupt:
         pass
+    finally:
+        if old_attr is not None:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_attr)
     print("\n종료합니다.")
 
 
@@ -626,7 +722,10 @@ def build_sources(args, p):
             path, prov = spec.rsplit(":", 1)
             sources.append((prov, "file", path))
         return sources
-    return [(prov, "live", prov) for prov in args.providers.split(",") if prov.strip()]
+    return [(prov,
+             "live-all" if prov == "antigravity" and prov not in ACCOUNT_OVERRIDES else "live",
+             prov)
+            for prov in args.providers.split(",") if prov.strip()]
 
 
 def main():
@@ -641,6 +740,9 @@ def main():
                    help="모킹 출력. '1'~'5' 또는 'all'(5종 전부) — 영상 촬영/검증용")
     p.add_argument("--file", action="append", metavar="PATH:PROVIDER", default=[],
                    help="JSON 파일에서 읽기 (예: samples/claude.json:claude). 반복 가능")
+    p.add_argument("--account", action="append", metavar="PROVIDER:LABEL", default=[],
+                   help="provider 계정 지정(codexbar --account 패스스루, 예: "
+                        "antigravity:foo@gmail.com). 반복 가능")
     p.add_argument("--watch", nargs="?", const=WATCH_INTERVAL, type=_watch_sec, metavar="SEC",
                    help=f"watch 모드(주기 자동 갱신, 기본 {WATCH_INTERVAL}초). Enter=수동 갱신")
     p.add_argument("--once", action="store_true",
@@ -652,6 +754,12 @@ def main():
     p.add_argument("--guard-check", action="store_true", dest="guard_check",
                    help="Codex 워처용 가드 체크(provider-중립). 정지면 exit≠0+사유, 통과면 exit0 무출력")
     args = p.parse_args()
+
+    for spec in args.account:
+        if ":" not in spec:
+            p.error(f"--account 형식은 PROVIDER:LABEL 이에요 (받은 값: {spec!r})")
+        prov, label = spec.split(":", 1)
+        ACCOUNT_OVERRIDES[prov] = label
 
     sources = build_sources(args, p)
 
