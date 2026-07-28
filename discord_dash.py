@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""usage-coach Discord 대시보드 — coach --json 출력을 메시지 본문(핵심 한 줄씩) +
-PNG 게이지 카드로 렌더해 디스코드 웹훅 메시지 하나를 계속 편집(업서트)한다.
-level이 나빠지면 새 메시지로 핑.
+"""usage-coach Discord 대시보드 — coach --json 출력을 Components V2 메시지
+(provider별 컨테이너 + 유니코드 게이지 바)로 조립해 디스코드 웹훅 메시지 하나를
+계속 편집(업서트)한다. level이 나빠지면 새 메시지로 핑.
 
-실행: LaunchAgent가 주기 실행(기본 5분). 수동 검증은 --out 으로 렌더만.
+실행: LaunchAgent가 주기 실행(기본 5분). 수동 검증은 --out 으로 JSON만.
 설정: ~/.config/usage-coach/discord.json {"webhook_url": "..."} 또는 env DISCORD_WEBHOOK_URL
 상태: ~/.config/usage-coach/discord-state.json {"message_id", "last_levels"}
 
-본문 텍스트가 '즉시 읽는 층'(디스코드 기본 폰트 — 프리뷰 축소 무관),
-카드는 '비주얼 상세 층'. 디스코드는 세로가 긴 이미지를 높이 기준으로 줄이므로
-카드는 헤더 없이 밀도를 높여 축소 손실을 최소화한다.
+전부 네이티브 텍스트라 데스크톱·모바일 어느 폭에서도 선명하다(이전 PNG 카드는
+세로가 길수록 통째로 축소돼 데스크톱에서 깨알이 됐다). 웹훅으로 components를
+보낼 때는 URL에 ?with_components=true 가 없으면 필드가 무시된다(50006).
 """
 import argparse
 import glob
-import io
 import json
 import os
 import re
@@ -22,11 +21,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-import uuid
-from datetime import datetime
 from pathlib import Path
-
-from PIL import Image, ImageDraw, ImageFont
 
 import coach as coachmod   # 판정 정책 재사용(classify 등) — 정본은 coach
 
@@ -34,7 +29,8 @@ COACH = Path(__file__).with_name("coach.py")
 CONFIG_PATH = os.path.expanduser("~/.config/usage-coach/discord.json")
 STATE_PATH = os.path.expanduser("~/.config/usage-coach/discord-state.json")
 SESSIONS_DIR = os.path.expanduser("~/.config/usage-coach/sessions")
-FILENAME = "usage-card.png"
+USERNAME = "dashboard"
+FLAG_COMPONENTS_V2 = 32768   # 1 << 15
 
 # level -> (색, 이모지, 종합 한 줄) — coach.py의 order/verdict와 동일 축
 LEVELS = {
@@ -45,11 +41,13 @@ LEVELS = {
     "green":  ("#43B581", "🟢", "큰 작업 OK"),
 }
 SEVERITY = {"red": 0, "yellow": 1, "wait": 2, "white": 3, "green": 4}   # 낮을수록 나쁨
-WIN_KO = {"5h": "5시간", "7d": "7일", "daily": "일일", "fable_7d": "Fable", "gemini": "Gemini"}
-# provider별 색 — coach.py PROV_COLOR(터미널 33/36/35)의 카드 버전
+# 게이지 라벨 — 코드 스팬 안에서 바와 정렬돼야 하므로 ASCII만(한글은 클라이언트별
+# 고정폭 폭이 달라 줄이 어긋난다)
+WIN_CODE = {"5h": "5h", "7d": "7d", "daily": "1d", "fable_7d": "Fable", "gemini": "Gemini"}
+# provider 브랜드색 — 평상시 컨테이너 accent. 위험(red/yellow/wait)이면 level 색이 덮는다
 PROV_HEX = {"claude": "#E5B567", "codex": "#7ED5F5", "antigravity": "#C89BF0"}
-
-GOTHIC = "/System/Library/Fonts/AppleSDGothicNeo.ttc"
+# 헤더 점도 같은 규칙 — 이모지 팔레트 한계 내의 브랜드 근사색
+PROV_EMOJI = {"claude": "🟠", "codex": "🔵", "antigravity": "🟣"}
 
 
 # ---------------------------------------------------------------- coach 호출
@@ -266,314 +264,165 @@ def load_sessions():
     return sessions
 
 
-def _ctx_color(used):
-    if used is None:
-        return "#565B66"
+def _ctx_emoji(used):
     if used >= 80:
-        return "#F04747"
+        return "🔴"
     if used >= 40:      # 사용자 마감 습관 기준 — 40%부터 주의
-        return "#FAA61A"
-    return "#43B581"
+        return "🟡"
+    return "🟢"
 
 
-# ---------------------------------------------------------------- 본문 텍스트 (즉시 읽는 층)
+# ---------------------------------------------------------------- Components V2 조립
 
-def build_content(payload):
-    lines = []
-    provs = payload.get("providers", {})
-    for key in provider_order(provs):
-        p = provs[key]
-        if not p.get("ok"):
-            lines.append(f"⚠️ **{key.title()}** 조회 실패")
-            continue
-        emoji = LEVELS.get(p.get("level"), (None, "⚪", None))[1]
-        pk = _primary_window(p.get("windows", {}))
-        pct = p.get("windows", {}).get(pk, {}).get("left_pct") if pk else None
-        head = f"{emoji} **{key.title()}**"
-        if p.get("multi") and p.get("email"):
-            head += f" {p['email'].split('@', 1)[0]}"   # 전 계정 중 추천(최여유) 계정
-        if pct is not None:
-            head += f" {WIN_KO.get(pk, pk)} {pct}%"
-        lines.append(f"{head} · {p.get('action', '')}")
-    return "\n".join(lines)
+BAR_W = 14
 
 
-# ---------------------------------------------------------------- 렌더러
-
-_FONT_INDEX = {}   # bold 여부 -> ttc index 캐시
-
-
-def _font(size, bold=False):
-    if not _FONT_INDEX:
-        want = {"regular": 0, "bold": 0}
-        for i in range(12):
-            try:
-                name = ImageFont.truetype(GOTHIC, 12, index=i).getname()[1].lower()
-            except OSError:
-                break
-            if name == "bold":
-                want["bold"] = i
-            if name == "regular":
-                want["regular"] = i
-        _FONT_INDEX.update(want)
-    idx = _FONT_INDEX["bold" if bold else "regular"]
-    return ImageFont.truetype(GOTHIC, size, index=idx)
+def _accent(hex_color):
+    return int(hex_color[1:], 16)
 
 
-def _fmt_reset(mins):
-    if not mins:
+def _bar(pct):
+    if pct is None:
+        return "░" * BAR_W
+    filled = max(0, min(BAR_W, round(pct / 100 * BAR_W)))
+    return "█" * filled + "░" * (BAR_W - filled)
+
+
+def _reset_rel(reset_min):
+    """<t:..:R> — 각 사용자 로컬 기준 '3시간 후'처럼 자동 표시."""
+    if not reset_min:
         return None
-    h, m = divmod(int(mins), 60)
-    if h >= 48:
-        d, h = divmod(h, 24)
-        return f"{d}d{h}h"
-    return f"{h}h{m:02d}m" if h else f"{m}m"
+    return f"<t:{int(time.time() + reset_min * 60)}:R>"
 
 
-def _wrap(draw, text, font, max_w):
-    lines, cur = [], ""
-    for ch in text:
-        if draw.textlength(cur + ch, font=font) > max_w and cur:
-            lines.append(cur)
-            cur = ch.lstrip()
-        else:
-            cur += ch
-    if cur:
-        lines.append(cur)
-    return lines
+def _accent_for(key, level):
+    """평상시 = 회사 브랜드색, 위험/대기(red·yellow·wait) = level 색."""
+    if level in ("red", "yellow", "wait"):
+        return LEVELS[level][0]
+    return PROV_HEX.get(key, LEVELS.get(level, ("#9AA4B2",))[0])
 
 
-def _hexrgb(c):
-    return tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
+def _win_emoji(pct):
+    """신호등 통일 — 평상시 🟢, 잔량 <50% 🟡, <25% 🔴 (미상 ⚪)."""
+    if pct is None:
+        return "⚪"
+    if pct < 25:
+        return "🔴"
+    if pct < 50:
+        return "🟡"
+    return "🟢"
 
 
-def _blend(fg, bg, t):
-    f, b = _hexrgb(fg), _hexrgb(bg)
-    return "#%02X%02X%02X" % tuple(int(fv * t + bv * (1 - t)) for fv, bv in zip(f, b))
-
-
-def _fit_left(draw, text, font, max_w):
-    """넘치면 앞쪽을 잘라 '…' + 꼬리(디렉토리는 끝부분이 정보량이 큼)."""
-    if draw.textlength(text, font=font) <= max_w:
-        return text
-    while text and draw.textlength("…" + text, font=font) > max_w:
-        text = text[1:]
-    return "…" + text
-
-
-def render(payload, sessions=None, w=520, scale=2):
-    provs = payload.get("providers", {})
-    order = provider_order(provs)
-    sessions = sessions or []
-
-    levels = [p["level"] for p in provs.values() if p.get("ok") and p.get("level")]
-    worst = min(levels, key=lambda l: SEVERITY.get(l, 9), default=None)
-    worst_color = LEVELS.get(worst, ("#565B66",))[0]
-
-    def S(v):
-        return int(v * scale)
-
-    # 섹션 높이 선계산 (reason 줄바꿈 측정용 더미 draw)
-    dummy = ImageDraw.Draw(Image.new("RGB", (8, 8)))
-    f_reason = _font(S(14))
-    sections = []
-    for key in order:
-        p = provs[key]
-        ok = p.get("ok")
-        windows = p.get("windows", {}) if ok else {}
-        reason = p.get("reason", "") if ok else str(p.get("error", ""))[:120]
-        lines = _wrap(dummy, reason, f_reason, S(w - 28 - 16))
-        if len(lines) > 2:
-            lines = [lines[0], lines[1][:-1] + "…"]
-        rows = len(p["multi"]) if p.get("multi") else len(windows)
-        h_sec = 30 + rows * 25 + 4 + len(lines) * 20 + 10
-        sections.append((key, p, windows, lines, h_sec))
-
-    sess_h = (40 + len(sessions) * 25) if sessions else 0
-    h = 16 + sum(s[4] for s in sections) + 12 * (len(sections) - 1) + sess_h + 24
-    W, H = w * scale, h * scale
-
-    # 배경 세로 그라데이션
-    grad = Image.new("RGB", (1, H))
-    top, bot = (17, 19, 26), (9, 10, 14)
-    for y in range(H):
-        t = y / H
-        grad.putpixel((0, y), tuple(int(a + (b - a) * t) for a, b in zip(top, bot)))
-    img = grad.resize((W, H))
-    d = ImageDraw.Draw(img)
-    BG = "#12141A"
-
-    d.rectangle([0, 0, W, S(3)], fill=worst_color)
-    y = 16
-    for si, (key, p, windows, lines, h_sec) in enumerate(sections):
-        ok = p.get("ok")
-        pcolor = PROV_HEX.get(key, "#9AA4B2")
-        lcolor = LEVELS.get(p.get("level"), ("#9AA4B2",))[0]
-
-        # 이름 + 코칭 action + 계정 이메일 한 줄
-        f_name = _font(S(20), True)
-        d.text((S(16), S(y + 2)), key.title(), font=f_name, fill=pcolor)
-        name_w = d.textlength(key.title(), font=f_name) / scale
-        dot_x = max(160, 16 + name_w + 16)
-        d.ellipse([S(dot_x), S(y + 10), S(dot_x + 12), S(y + 22)], fill=lcolor)
-        action = p.get("action", "") if ok else "조회 실패"
-        f_action = _font(S(17), True)
-        d.text((S(dot_x + 20), S(y + 4)), action, font=f_action, fill=lcolor)
-        email = p.get("email") or ""
-        if email:
-            action_end = dot_x + 20 + d.textlength(action, font=f_action) / scale
-            f_email = _font(S(12))
-            if d.textlength(email, font=f_email) / scale > w - 16 - action_end - 16:
-                email = email.split("@", 1)[0]   # 공간 부족 시 @ 앞부분만
-            ew = d.textlength(email, font=f_email)
-            d.text((W - S(16) - ew, S(y + 9)), email, font=f_email, fill="#6B7280")
-        y += 30
-
-        track = _blend(pcolor, BG, 0.22)
-        multi = p.get("multi")
-        if multi:
-            # 계정별 바 — 라벨 = 이메일 @ 앞부분, 바 = Gemini(주 윈도우) 잔량
-            for acc in multi:
-                alc = LEVELS.get(acc.get("level"), ("#565B66",))[0]
-                d.ellipse([S(28), S(y + 7), S(28 + 9), S(y + 16)], fill=alc)
-                local = (acc.get("email") or "?").split("@", 1)[0]
-                d.text((S(42), S(y + 4)), local, font=_font(S(13)), fill="#8B93A2")
-                pk = _primary_window(acc.get("windows", {}))
-                info = acc.get("windows", {}).get(pk, {}) if pk else {}
-                d.rounded_rectangle([S(132), S(y + 6), S(132 + 206), S(y + 18)],
-                                    radius=S(6), fill=track)
-                pct = info.get("left_pct")
-                if pct:
-                    d.rounded_rectangle([S(132), S(y + 6),
-                                         S(132 + 206 * pct / 100), S(y + 18)],
-                                        radius=S(6), fill=pcolor)
-                d.text((S(132 + 206 + 8), S(y + 3)),
-                       f"{pct}%" if pct is not None else "—",
-                       font=_font(S(15), True), fill="#E7EAF0")
-                reset = _fmt_reset(info.get("reset_min"))
-                if reset:
-                    rw = d.textlength(f"{reset} 남음", font=_font(S(13)))
-                    d.text((W - S(16) - rw, S(y + 4)), f"{reset} 남음",
-                           font=_font(S(13)), fill="#6B7280")
-                y += 25
-            windows = {}   # 아래 단일 윈도우 루프 생략
-
-        # 윈도우 바 (provider 색)
-        for wk, info in windows.items():
-            d.text((S(28), S(y + 4)), WIN_KO.get(wk, wk), font=_font(S(14)), fill="#8B93A2")
-            bar_x, bar_w = 88, 250
-            d.rounded_rectangle([S(bar_x), S(y + 6), S(bar_x + bar_w), S(y + 18)],
-                                radius=S(6), fill=track)
-            pct = info.get("left_pct") or 0
-            if pct > 0:
-                d.rounded_rectangle([S(bar_x), S(y + 6), S(bar_x + bar_w * pct / 100), S(y + 18)],
-                                    radius=S(6), fill=pcolor)
-            d.text((S(bar_x + bar_w + 8), S(y + 3)), f"{pct}%", font=_font(S(15), True),
-                   fill="#E7EAF0")
-            reset = _fmt_reset(info.get("reset_min"))
+def _provider_container(key, p):
+    if not p.get("ok"):
+        return {"type": 17, "accent_color": _accent("#565B66"), "components": [
+            {"type": 10,
+             "content": f"### {key.title()}\n⚠️ 조회 실패 — {str(p.get('error', ''))[:120]}"}]}
+    level = p.get("level")
+    emoji = LEVELS.get(level, ("#9AA4B2", "⚪", ""))[1]
+    if level in ("green", "white"):
+        emoji = PROV_EMOJI.get(key, emoji)
+    head = f"### {emoji} {key.title()} — {p.get('action', '')}"
+    if p.get("email"):
+        head += f"\n-# {p['email']}"
+    lines = []
+    if p.get("multi"):
+        width = max((len((a.get("email") or "?").split("@", 1)[0]) for a in p["multi"]),
+                    default=1)
+        for acc in p["multi"]:
+            local = (acc.get("email") or "?").split("@", 1)[0]
+            pk = _primary_window(acc.get("windows", {}))
+            info = acc.get("windows", {}).get(pk, {}) if pk else {}
+            pct = info.get("left_pct")
+            line = (f"{_win_emoji(pct)} `{local.ljust(width)}  {_bar(pct)}` "
+                    f"**{'—' if pct is None else pct}%**")
+            reset = _reset_rel(info.get("reset_min"))
             if reset:
-                rw = d.textlength(f"{reset} 남음", font=_font(S(13)))
-                d.text((W - S(16) - rw, S(y + 4)), f"{reset} 남음", font=_font(S(13)),
-                       fill="#6B7280")
-            y += 25
+                line += f" · 리셋 {reset}"
+            lines.append(line)
+    else:
+        windows = p.get("windows", {})
+        lw = max((len(WIN_CODE.get(wk, wk)) for wk in windows), default=0)
+        for wk, info in windows.items():
+            pct = info.get("left_pct")
+            line = (f"{_win_emoji(pct)} `{WIN_CODE.get(wk, wk).ljust(lw)}  {_bar(pct)}` "
+                    f"**{'—' if pct is None else pct}%**")
+            reset = _reset_rel(info.get("reset_min"))
+            if reset:
+                line += f" · 리셋 {reset}"
+            lines.append(line)
+    children = [{"type": 10, "content": head}]
+    if lines:
+        children.append({"type": 10, "content": "\n".join(lines)})
+    if p.get("reason"):
+        children.append({"type": 10, "content": f"**{p['reason']}**"})
+    return {"type": 17, "accent_color": _accent(_accent_for(key, p.get("level"))),
+            "components": children}
 
-        # reason
-        y += 4
-        for ln in lines:
-            d.text((S(28), S(y)), ln, font=f_reason, fill="#8B93A2")
-            y += 20
-        y += 10
 
-        if si < len(sections) - 1:
-            d.line([S(16), S(y + 2), W - S(16), S(y + 2)], fill="#232833", width=S(1))
-            y += 12
+def _bots_container(bots):
+    rows = []
+    heads = [f"{s.get('label') or '?'}  [{s.get('tag') or '?'}]" for s in bots]
+    width = max((len(h) for h in heads), default=1)
+    for s, head in zip(bots, heads):
+        used = s.get("used")
+        emoji = "⚪" if (s.get("note") or used is None) else _ctx_emoji(used)
+        ctx = f"{round(used)}%" if used is not None else "—"
+        line = f"{emoji} `{head.ljust(width)}  {_bar(used)}` **{ctx}**"
+        extra = s.get("note") or _fmt_age(s.get("ts"))
+        if extra:
+            line += f" · {extra}"
+        rows.append(line)
+    # accent = 가장 빡빡한 세션의 ctx 색 (ctx 미상뿐이면 회색)
+    worst = max((s["used"] for s in bots if s.get("used") is not None), default=None)
+    color = ("#565B66" if worst is None else
+             "#F04747" if worst >= 80 else "#FAA61A" if worst >= 40 else "#43B581")
+    return {"type": 17, "accent_color": _accent(color), "components": [
+        {"type": 10, "content": "### 봇 세션"},
+        {"type": 10, "content": "\n".join(rows)}]}
 
-    # 봇 세션 섹션 — 디스코드에 붙은 봇별 폴더 경로 [봇/모델] ctx%
-    if sessions:
-        d.line([S(16), S(y + 2), W - S(16), S(y + 2)], fill="#232833", width=S(1))
-        y += 14
-        d.text((S(16), S(y)), "봇 세션", font=_font(S(16), True), fill="#C9D1DE")
-        cnt = f"{len(sessions)}개"
-        cw = d.textlength(cnt, font=_font(S(12)))
-        d.text((W - S(16) - cw, S(y + 4)), cnt, font=_font(S(12)), fill="#6B7280")
-        y += 26
-        f_row = _font(S(13))
-        f_sub = _font(S(12))
-        for s in sessions:
-            note = s.get("note")
-            used = s.get("used")
-            color = "#565B66" if note else _ctx_color(used)
-            d.ellipse([S(28), S(y + 5), S(28 + 9), S(y + 14)], fill=color)
-            ctx_s = f"{round(used)}%" if used is not None else "—"
-            ctx_w = d.textlength(ctx_s, font=_font(S(14), True))
-            d.text((W - S(16) - ctx_w, S(y + 1)), ctx_s, font=_font(S(14), True), fill=color)
-            tag = f"[{s.get('tag') or '?'}]"
-            tag_color = PROV_HEX.get({"codex": "codex", "agy": "antigravity",
-                                      "claude": "claude"}.get(s.get("kind"), ""), "#8B93A2")
-            tw_ = d.textlength(tag, font=f_row)
-            mx = w - 16 - ctx_w / scale - 8 - tw_ / scale
-            d.text((S(mx), S(y + 2)), tag, font=f_row, fill=tag_color)
-            extra = note or _fmt_age(s.get("ts"))
-            extra_w = (d.textlength(f" · {extra}", font=f_sub) / scale + 4) if extra else 0
-            label = _fit_left(d, s.get("label") or "?", f_row, S(mx - 42 - 8 - extra_w))
-            d.text((S(42), S(y + 2)), label, font=f_row, fill="#C9D1DE")
-            if extra:
-                lx = 42 + d.textlength(label, font=f_row) / scale
-                d.text((S(lx), S(y + 3)), f" · {extra}", font=f_sub, fill="#6B7280")
-            y += 25
 
-    ts_local = datetime.now().strftime("%m/%d %H:%M")
-    tw = d.textlength(f"{ts_local} 갱신", font=_font(S(12)))
-    d.text((W - S(16) - tw, H - S(22)), f"{ts_local} 갱신", font=_font(S(12)), fill="#565B66")
-
-    out = img.resize((w, h), Image.LANCZOS)
-    buf = io.BytesIO()
-    out.save(buf, "PNG")
-    return buf.getvalue()
+def build_components(payload, bots):
+    provs = payload.get("providers", {})
+    comps = [_provider_container(key, provs[key]) for key in provider_order(provs)]
+    if bots:
+        comps.append(_bots_container(bots))
+    comps.append({"type": 10, "content": f"-# 갱신 <t:{int(time.time())}:R>"})
+    return comps
 
 
 # ---------------------------------------------------------------- 디스코드 웹훅
 
-def _multipart(payload_json, png):
-    boundary = "----coachdash" + uuid.uuid4().hex
-    body = io.BytesIO()
-
-    def part(s):
-        body.write(s.encode() if isinstance(s, str) else s)
-
-    part(f"--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
-         f"Content-Type: application/json\r\n\r\n{json.dumps(payload_json, ensure_ascii=False)}\r\n")
-    part(f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[0]\"; "
-         f"filename=\"{FILENAME}\"\r\nContent-Type: image/png\r\n\r\n")
-    part(png)
-    part(f"\r\n--{boundary}--\r\n")
-    return body.getvalue(), f"multipart/form-data; boundary={boundary}"
-
-
-def _request(url, method, payload_json, png=None):
-    if png is not None:
-        data, ctype = _multipart(payload_json, png)
-    else:
-        data, ctype = json.dumps(payload_json, ensure_ascii=False).encode(), "application/json"
-    req = urllib.request.Request(url, data=data, method=method,
-                                 headers={"Content-Type": ctype, "User-Agent": "usage-coach-dash"})
+def _request(url, method, payload_json):
+    data = None if payload_json is None else json.dumps(payload_json,
+                                                        ensure_ascii=False).encode()
+    headers = {"User-Agent": "usage-coach-dash"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
     with urllib.request.urlopen(req, timeout=30) as r:
         raw = r.read()
     return json.loads(raw) if raw else {}
 
 
-def upsert_card(webhook, png, content, state, force_new=False):
-    body = {"content": content, "attachments": [{"id": 0, "filename": FILENAME}]}
+def upsert_card(webhook, components, state, force_new=False):
     mid = state.get("message_id")
     if mid and not force_new:
         try:
-            _request(f"{webhook}/messages/{mid}", "PATCH", body, png)
+            _request(f"{webhook}/messages/{mid}?with_components=true", "PATCH",
+                     {"components": components})
             return mid
         except urllib.error.HTTPError as e:
-            if e.code != 404:
+            if e.code not in (400, 404):
                 raise
-    res = _request(f"{webhook}?wait=true", "POST",
-                   {"username": "Usage Coach", **body}, png)
+            if e.code == 400:   # V2 이전(PNG 카드) 메시지는 전환 편집 불가 → 지우고 새로
+                try:
+                    _request(f"{webhook}/messages/{mid}", "DELETE", None)
+                except urllib.error.HTTPError:
+                    pass
+    res = _request(f"{webhook}?wait=true&with_components=true", "POST",
+                   {"username": USERNAME, "flags": FLAG_COMPONENTS_V2,
+                    "components": components})
     return res.get("id")
 
 
@@ -593,7 +442,7 @@ def ping_if_worse(webhook, payload, state):
             if p.get("email"):
                 who += f"({p['email'].split('@', 1)[0]})"
             _request(webhook, "POST", {
-                "username": "Usage Coach",
+                "username": USERNAME,
                 "content": f"{emoji} **{who}** {verdict} — {p.get('action', '')}",
             })
     return now
@@ -634,8 +483,8 @@ def save_state(state):
 # ---------------------------------------------------------------- main
 
 def main():
-    ap = argparse.ArgumentParser(description="usage-coach 디스코드 게이지 카드")
-    ap.add_argument("--out", metavar="PATH", help="PNG만 렌더해 저장(웹훅 미사용)")
+    ap = argparse.ArgumentParser(description="usage-coach 디스코드 대시보드 (Components V2)")
+    ap.add_argument("--out", metavar="PATH", help="컴포넌트 JSON만 저장(웹훅 미사용)")
     ap.add_argument("--webhook", help="웹훅 URL(설정 파일보다 우선)")
     ap.add_argument("--force-new", action="store_true", help="편집 대신 새 메시지 게시")
     ap.add_argument("--mock", metavar="N", help="coach --mock 전달(1~5|all)")
@@ -671,12 +520,12 @@ def main():
     if multi_provs:
         merge_all_accounts(payload, multi_provs, config)
 
-    png = render(payload, collect_bots(config))
+    components = build_components(payload, collect_bots(config))
 
     if args.out:
-        Path(args.out).write_bytes(png)
-        print(f"렌더 완료: {args.out} ({len(png) // 1024}KB)")
-        print(build_content(payload))
+        Path(args.out).write_text(json.dumps(components, ensure_ascii=False, indent=1),
+                                  encoding="utf-8")
+        print(f"컴포넌트 JSON 저장: {args.out}")
         return 0
 
     webhook = load_webhook(args.webhook, config)
@@ -687,8 +536,7 @@ def main():
 
     state = load_state()
     state["last_levels"] = ping_if_worse(webhook, payload, state)
-    state["message_id"] = upsert_card(webhook, png, build_content(payload), state,
-                                      args.force_new)
+    state["message_id"] = upsert_card(webhook, components, state, args.force_new)
     save_state(state)
     return 0
 

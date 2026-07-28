@@ -61,17 +61,18 @@ codexbar 제약: `--provider all`은 hang하므로 provider별로 따로 조회�
 
 ## 디스코드 대시보드 (`discord_dash.py`)
 
-coach 출력을 PNG 게이지 카드로 렌더해 디스코드 웹훅 메시지 하나를 **계속 편집**하는 라이브 대시보드. 채널을 열면 항상 최신 카드가 보인다.
+coach 출력을 **Components V2** 메시지(provider별 컨테이너 + 유니코드 게이지 바)로 조립해 디스코드 웹훅 메시지 하나를 **계속 편집**하는 라이브 대시보드. 채널을 열면 항상 최신 상태가 보인다. 전부 네이티브 텍스트라 데스크톱·모바일 어느 폭에서도 선명하다(구버전 PNG 카드는 세로가 길수록 통째로 축소되는 문제가 있어 교체).
 
-- 카드 구성 = provider별 도넛 게이지(주 윈도우) + 보조 윈도우 바 + **코칭 문구(action·reason 전문)** + 리셋 카운트다운.
-- **세션 섹션**: Claude Code statusline이 `~/.config/usage-coach/sessions/`에 남기는 스냅샷으로 활동 중 세션(디렉토리·모델·컨텍스트 사용률)을 표시. statusline 스크립트에 스냅샷 기록 몇 줄을 추가해야 한다(입력 JSON의 `session_id`·`context_window.used_percentage` 사용, 30분 무활동 시 목록에서 제외).
+- 구성 = provider별 컨테이너(accent 색 = level) 안에 윈도우별 게이지 바 + **코칭 문구(action·reason 전문)** + 리셋 시각(`<t:..:R>` — 보는 사람 로컬 기준 "3시간 후"처럼 자동 표시).
+- **봇 세션 섹션**: Claude Code statusline이 `~/.config/usage-coach/sessions/`에 남기는 스냅샷으로 활동 중 세션(디렉토리·모델·컨텍스트 사용률)을 표시. statusline 스크립트에 스냅샷 기록 몇 줄을 추가해야 한다(입력 JSON의 `session_id`·`context_window.used_percentage` 사용, 30분 무활동 시 목록에서 제외).
 - level이 🟡/🔴로 **나빠지는 순간에만** 새 메시지를 게시해 푸시 알림을 울린다(평소 편집은 무알림).
-- 이 스크립트만 [Pillow](https://python-pillow.org) 필요(coach 본체는 여전히 무의존성). 한글 폰트는 macOS 내장 AppleSDGothicNeo 사용.
+- 의존성 없음(coach 본체와 동일 — 표준 라이브러리만).
+- 함정: 웹훅으로 components를 보낼 때 URL에 `?with_components=true`가 없으면 필드가 통째로 무시된다(`Cannot send an empty message`, 50006). POST·PATCH(편집) 모두 해당.
 
 ```bash
-python3 discord_dash.py --out card.png      # 렌더만(웹훅 미사용, 검증용)
-python3 discord_dash.py --mock all --out c.png
-python3 discord_dash.py                     # 조회→렌더→웹훅 업서트(+악화 핑)
+python3 discord_dash.py --out c.json        # 컴포넌트 JSON만 저장(웹훅 미사용, 검증용)
+python3 discord_dash.py --mock all --out c.json
+python3 discord_dash.py                     # 조회→조립→웹훅 업서트(+악화 핑)
 ```
 
 설정: `~/.config/usage-coach/discord.json`에 `{"webhook_url": "..."}` (또는 env `DISCORD_WEBHOOK_URL`). 같은 파일의 `"coach_args": ["--account", "antigravity:foo@gmail.com"]`로 대시보드가 추적할 계정을 고정할 수 있다(카드에 계정 이메일 표시됨). 여러 계정을 오가는 provider는 `"all_accounts"`(기본 `["antigravity"]`)에 넣으면 codexbar `--all-accounts`로 **등록된 전 계정을 계정별 바로 표시**하고, 코칭·본문·핑은 가장 여유 있는 계정 기준으로 잡는다(끄려면 `"all_accounts": []`). 상태(메시지 ID·직전 level)는 `discord-state.json`에 저장. 주기 실행은 LaunchAgent 등으로 5분 간격 권장(웹훅만 쓰므로 봇 토큰·gateway 불필요).
