@@ -12,11 +12,14 @@ level이 나빠지면 새 메시지로 핑.
 카드는 헤더 없이 밀도를 높여 축소 손실을 최소화한다.
 """
 import argparse
+import glob
 import io
 import json
 import os
+import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -30,6 +33,7 @@ import coach as coachmod   # 판정 정책 재사용(classify 등) — 정본은
 COACH = Path(__file__).with_name("coach.py")
 CONFIG_PATH = os.path.expanduser("~/.config/usage-coach/discord.json")
 STATE_PATH = os.path.expanduser("~/.config/usage-coach/discord-state.json")
+SESSIONS_DIR = os.path.expanduser("~/.config/usage-coach/sessions")
 FILENAME = "usage-card.png"
 
 # level -> (색, 이모지, 종합 한 줄) — coach.py의 order/verdict와 동일 축
@@ -115,6 +119,163 @@ def _primary_window(windows):
     return next(iter(windows), None)
 
 
+# ---------------------------------------------------------------- 디스코드 브리지 세션
+
+# 디스코드에 붙어 있는 봇들 — 봇마다 한 행(폴더 경로 [봇/모델] ctx%)으로 표시.
+# 브리지 봇은 config "bridges", 클로드 봇은 "claude_bots"로 교체 가능.
+DEFAULT_BRIDGES = [
+    {"name": "Codex", "kind": "codex", "dir": "~/ai-folder/dev/codex-discord/data",
+     "env": "~/ai-folder/dev/codex-discord/.env"},
+    {"name": "Gemini", "kind": "agy", "dir": "~/ai-folder/dev/codex-discord/data-gemini",
+     "env": "~/ai-folder/dev/codex-discord/.env.gemini"},
+]
+CLAUDE_BOTS_DEFAULT = [
+    {"name": "Claude", "kind": "claude", "cwd": "~/ai-folder/dev/discord-multiagent"},  # 오케 봇
+    {"name": "Claude", "kind": "claude", "cwd": "~/VSCodeWorkspace/discord"},           # 수다 클로드 봇
+]
+CODEX_SESSIONS_ROOT = os.path.expanduser("~/.codex/sessions")
+CODEX_BASELINE = 12000   # codex TUI가 컨텍스트 % 계산에서 제외하는 기본 오버헤드 토큰
+
+
+def _pid_alive(path):
+    try:
+        pid = int(open(path).read().strip())
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _codex_latest(workdir):
+    """workdir에서 가장 최근 활동한 codex 세션(TUI 포함) -> (used%, ts, model).
+
+    exec/TUI 어느 쪽이든 rollout의 session_meta cwd로 판별한다. used%는 codex TUI와
+    같은 식(baseline 오버헤드 제외): (total - 12000) / (window - 12000)."""
+    files = glob.glob(os.path.join(CODEX_SESSIONS_ROOT, "*", "*", "*", "*.jsonl"))
+    files.sort(key=os.path.getmtime, reverse=True)
+    for path in files[:400]:
+        try:
+            with open(path, "rb") as f:
+                head = f.readline().decode("utf-8", "replace")
+        except OSError:
+            continue
+        if f'"cwd":"{workdir}"' not in head:
+            continue
+        mtime = os.path.getmtime(path)
+        try:
+            with open(path, "rb") as f:
+                f.seek(max(0, os.path.getsize(path) - 131072))
+                tail = f.read().decode("utf-8", "replace")
+        except OSError:
+            return None, mtime, None
+        models = re.findall(r'"model":"([^"]+)"', tail)
+        model = models[-1] if models else None
+        for line in reversed(tail.splitlines()):
+            if '"token_count"' not in line:
+                continue
+            try:
+                info = json.loads(line[line.index("{"):])["payload"]["info"]
+                total = info["last_token_usage"]["total_tokens"]
+                window = info["model_context_window"]
+                used = max(0.0, total - CODEX_BASELINE) / (window - CODEX_BASELINE) * 100
+                return used, mtime, model
+            except (ValueError, KeyError, TypeError, ZeroDivisionError):
+                continue
+        return None, mtime, model
+    return None, None, None
+
+
+def _env_var(path, name):
+    try:
+        for line in open(os.path.expanduser(path)):
+            if line.startswith(name + "="):
+                return line.split("=", 1)[1].strip()
+    except (OSError, TypeError):
+        pass
+    return None
+
+
+def _fmt_age(ts):
+    if not ts:
+        return None
+    sec = max(0, time.time() - ts)
+    if sec < 60:
+        return "방금"
+    if sec < 3600:
+        return f"{int(sec // 60)}분 전"
+    if sec < 86400:
+        return f"{int(sec // 3600)}시간 전"
+    return f"{int(sec // 86400)}일 전"
+
+
+def _shorten_home(path):
+    return (path or "").replace(os.path.expanduser("~"), "~")
+
+
+def collect_bots(config):
+    """디스코드 봇별 한 행: 작업 폴더 + ctx%(+ 마지막 활동). statusline 형식과 동일 축."""
+    rows = []
+    # 브리지 봇(codex/gemini) — 폴더 = CODEX_WORKDIR, ctx·모델 = 최근 활동 세션 rollout
+    for b in config.get("bridges", DEFAULT_BRIDGES):
+        d = os.path.expanduser(b["dir"])
+        workdir_abs = _env_var(b.get("env"), "CODEX_WORKDIR") or ""
+        alive = _pid_alive(os.path.join(d, "daemon.pid"))
+        used, ts, model = (None, None, None)
+        if b["kind"] == "codex" and workdir_abs:
+            used, ts, model = _codex_latest(workdir_abs)
+        rows.append({"label": _shorten_home(workdir_abs) or "?",
+                     "tag": model or b["name"], "kind": b["kind"],
+                     "used": used, "ts": ts,
+                     "note": None if alive else "브리지 꺼짐"})
+    # 클로드 봇(오케 등) — statusline 스냅샷에서 해당 폴더의 최신 세션을 찾는다
+    snaps = load_sessions()
+    for cb in config.get("claude_bots", CLAUDE_BOTS_DEFAULT):
+        cwd = _shorten_home(os.path.expanduser(cb["cwd"]))
+        best = max((s for s in snaps if s.get("cwd") == cwd),
+                   key=lambda s: s.get("ts") or 0, default=None)
+        rows.append({"label": cwd,
+                     "tag": (best or {}).get("model") or cb.get("name", "Claude"),
+                     "kind": "claude",
+                     "used": (best or {}).get("used"),
+                     "ts": (best or {}).get("ts"), "note": None})
+    return rows
+
+
+# ---------------------------------------------------------------- 세션 스냅샷 (statusline이 기록)
+
+def load_sessions():
+    """statusline-command.sh가 남긴 로컬 Claude Code 세션 스냅샷 목록(48시간 지난 파일 청소).
+    표시 여부 판단은 호출부(collect_bots — 봇 폴더와 매칭되는 것만)."""
+    sessions, now = [], time.time()
+    try:
+        names = os.listdir(SESSIONS_DIR)
+    except OSError:
+        return []
+    for name in names:
+        path = os.path.join(SESSIONS_DIR, name)
+        try:
+            if now - os.path.getmtime(path) > 172800:
+                os.remove(path)
+                continue
+            with open(path, encoding="utf-8") as f:
+                s = json.load(f)
+            s["cwd"] = (s.get("cwd") or "").replace(os.path.expanduser("~"), "~")
+            sessions.append(s)
+        except (OSError, json.JSONDecodeError):
+            continue
+    return sessions
+
+
+def _ctx_color(used):
+    if used is None:
+        return "#565B66"
+    if used >= 80:
+        return "#F04747"
+    if used >= 40:      # 사용자 마감 습관 기준 — 40%부터 주의
+        return "#FAA61A"
+    return "#43B581"
+
+
 # ---------------------------------------------------------------- 본문 텍스트 (즉시 읽는 층)
 
 def build_content(payload):
@@ -191,9 +352,19 @@ def _blend(fg, bg, t):
     return "#%02X%02X%02X" % tuple(int(fv * t + bv * (1 - t)) for fv, bv in zip(f, b))
 
 
-def render(payload, w=520, scale=2):
+def _fit_left(draw, text, font, max_w):
+    """넘치면 앞쪽을 잘라 '…' + 꼬리(디렉토리는 끝부분이 정보량이 큼)."""
+    if draw.textlength(text, font=font) <= max_w:
+        return text
+    while text and draw.textlength("…" + text, font=font) > max_w:
+        text = text[1:]
+    return "…" + text
+
+
+def render(payload, sessions=None, w=520, scale=2):
     provs = payload.get("providers", {})
     order = provider_order(provs)
+    sessions = sessions or []
 
     levels = [p["level"] for p in provs.values() if p.get("ok") and p.get("level")]
     worst = min(levels, key=lambda l: SEVERITY.get(l, 9), default=None)
@@ -218,7 +389,8 @@ def render(payload, w=520, scale=2):
         h_sec = 30 + rows * 25 + 4 + len(lines) * 20 + 10
         sections.append((key, p, windows, lines, h_sec))
 
-    h = 16 + sum(s[4] for s in sections) + 12 * (len(sections) - 1) + 24
+    sess_h = (40 + len(sessions) * 25) if sessions else 0
+    h = 16 + sum(s[4] for s in sections) + 12 * (len(sections) - 1) + sess_h + 24
     W, H = w * scale, h * scale
 
     # 배경 세로 그라데이션
@@ -315,6 +487,40 @@ def render(payload, w=520, scale=2):
         if si < len(sections) - 1:
             d.line([S(16), S(y + 2), W - S(16), S(y + 2)], fill="#232833", width=S(1))
             y += 12
+
+    # 봇 세션 섹션 — 디스코드에 붙은 봇별 폴더 경로 [봇/모델] ctx%
+    if sessions:
+        d.line([S(16), S(y + 2), W - S(16), S(y + 2)], fill="#232833", width=S(1))
+        y += 14
+        d.text((S(16), S(y)), "봇 세션", font=_font(S(16), True), fill="#C9D1DE")
+        cnt = f"{len(sessions)}개"
+        cw = d.textlength(cnt, font=_font(S(12)))
+        d.text((W - S(16) - cw, S(y + 4)), cnt, font=_font(S(12)), fill="#6B7280")
+        y += 26
+        f_row = _font(S(13))
+        f_sub = _font(S(12))
+        for s in sessions:
+            note = s.get("note")
+            used = s.get("used")
+            color = "#565B66" if note else _ctx_color(used)
+            d.ellipse([S(28), S(y + 5), S(28 + 9), S(y + 14)], fill=color)
+            ctx_s = f"{round(used)}%" if used is not None else "—"
+            ctx_w = d.textlength(ctx_s, font=_font(S(14), True))
+            d.text((W - S(16) - ctx_w, S(y + 1)), ctx_s, font=_font(S(14), True), fill=color)
+            tag = f"[{s.get('tag') or '?'}]"
+            tag_color = PROV_HEX.get({"codex": "codex", "agy": "antigravity",
+                                      "claude": "claude"}.get(s.get("kind"), ""), "#8B93A2")
+            tw_ = d.textlength(tag, font=f_row)
+            mx = w - 16 - ctx_w / scale - 8 - tw_ / scale
+            d.text((S(mx), S(y + 2)), tag, font=f_row, fill=tag_color)
+            extra = note or _fmt_age(s.get("ts"))
+            extra_w = (d.textlength(f" · {extra}", font=f_sub) / scale + 4) if extra else 0
+            label = _fit_left(d, s.get("label") or "?", f_row, S(mx - 42 - 8 - extra_w))
+            d.text((S(42), S(y + 2)), label, font=f_row, fill="#C9D1DE")
+            if extra:
+                lx = 42 + d.textlength(label, font=f_row) / scale
+                d.text((S(lx), S(y + 3)), f" · {extra}", font=f_sub, fill="#6B7280")
+            y += 25
 
     ts_local = datetime.now().strftime("%m/%d %H:%M")
     tw = d.textlength(f"{ts_local} 갱신", font=_font(S(12)))
@@ -464,7 +670,8 @@ def main():
     payload = fetch_payload(extra)
     if multi_provs:
         merge_all_accounts(payload, multi_provs, config)
-    png = render(payload)
+
+    png = render(payload, collect_bots(config))
 
     if args.out:
         Path(args.out).write_bytes(png)

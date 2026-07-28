@@ -64,6 +64,7 @@ codexbar 제약: `--provider all`은 hang하므로 provider별로 따로 조회�
 coach 출력을 PNG 게이지 카드로 렌더해 디스코드 웹훅 메시지 하나를 **계속 편집**하는 라이브 대시보드. 채널을 열면 항상 최신 카드가 보인다.
 
 - 카드 구성 = provider별 도넛 게이지(주 윈도우) + 보조 윈도우 바 + **코칭 문구(action·reason 전문)** + 리셋 카운트다운.
+- **세션 섹션**: Claude Code statusline이 `~/.config/usage-coach/sessions/`에 남기는 스냅샷으로 활동 중 세션(디렉토리·모델·컨텍스트 사용률)을 표시. statusline 스크립트에 스냅샷 기록 몇 줄을 추가해야 한다(입력 JSON의 `session_id`·`context_window.used_percentage` 사용, 30분 무활동 시 목록에서 제외).
 - level이 🟡/🔴로 **나빠지는 순간에만** 새 메시지를 게시해 푸시 알림을 울린다(평소 편집은 무알림).
 - 이 스크립트만 [Pillow](https://python-pillow.org) 필요(coach 본체는 여전히 무의존성). 한글 폰트는 macOS 내장 AppleSDGothicNeo 사용.
 
