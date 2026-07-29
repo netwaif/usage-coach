@@ -65,6 +65,14 @@ coach 출력을 **Components V2** 메시지(provider별 컨테이너 + 유니코
 
 - 구성 = provider별 컨테이너(accent 색 = level) 안에 윈도우별 게이지 바 + **코칭 문구(action·reason 전문)** + 리셋 시각(`<t:..:R>` — 보는 사람 로컬 기준 "3시간 후"처럼 자동 표시).
 - **봇 세션 섹션**: Claude Code statusline이 `~/.config/usage-coach/sessions/`에 남기는 스냅샷으로 활동 중 세션(디렉토리·모델·컨텍스트 사용률)을 표시. statusline 스크립트에 스냅샷 기록 몇 줄을 추가해야 한다(입력 JSON의 `session_id`·`context_window.used_percentage` 사용, 30분 무활동 시 목록에서 제외).
+  - 스냅샷에 **`project_dir`(세션을 띄운 폴더)를 반드시 함께 기록**할 것 — `current_dir`만 적으면 세션이 하위 폴더로 `cd` 한 순간 봇 행 매칭이 끊겨 표시가 멈춘다(실측). 기록 예:
+    ```jq
+    {cwd: (.workspace.current_dir // .cwd // ""),
+     project_dir: (.workspace.project_dir // .workspace.current_dir // .cwd // ""),
+     model: (.model.display_name // ""),
+     used: (.context_window.used_percentage // null), ts: (now | floor)}
+    ```
+    매칭은 `project_dir` 우선, 없으면 `cwd` 폴백이라 옛 스냅샷도 그대로 동작한다.
 - level이 🟡/🔴로 **나빠지는 순간에만** 새 메시지를 게시해 푸시 알림을 울린다(평소 편집은 무알림).
 - 의존성 없음(coach 본체와 동일 — 표준 라이브러리만).
 - 함정: 웹훅으로 components를 보낼 때 URL에 `?with_components=true`가 없으면 필드가 통째로 무시된다(`Cannot send an empty message`, 50006). POST·PATCH(편집) 모두 해당.

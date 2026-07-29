@@ -229,7 +229,9 @@ def collect_bots(config):
     snaps = load_sessions()
     for cb in config.get("claude_bots", CLAUDE_BOTS_DEFAULT):
         cwd = _shorten_home(os.path.expanduser(cb["cwd"]))
-        best = max((s for s in snaps if s.get("cwd") == cwd),
+        # project_dir(세션을 띄운 폴더) 우선 — 봇이 tasks/ 하위로 cd 해도 행이 끊기지 않는다.
+        # project_dir이 없는 옛 스냅샷은 cwd로 폴백.
+        best = max((s for s in snaps if (s.get("project_dir") or s.get("cwd")) == cwd),
                    key=lambda s: s.get("ts") or 0, default=None)
         rows.append({"label": cwd,
                      "tag": (best or {}).get("model") or cb.get("name", "Claude"),
@@ -257,7 +259,10 @@ def load_sessions():
                 continue
             with open(path, encoding="utf-8") as f:
                 s = json.load(f)
-            s["cwd"] = (s.get("cwd") or "").replace(os.path.expanduser("~"), "~")
+            home = os.path.expanduser("~")
+            s["cwd"] = (s.get("cwd") or "").replace(home, "~")
+            if s.get("project_dir"):
+                s["project_dir"] = s["project_dir"].replace(home, "~")
             sessions.append(s)
         except (OSError, json.JSONDecodeError):
             continue
