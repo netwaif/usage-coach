@@ -133,6 +133,16 @@ CLAUDE_BOTS_DEFAULT = [
 ]
 CODEX_SESSIONS_ROOT = os.path.expanduser("~/.codex/sessions")
 CODEX_BASELINE = 12000   # codex TUI가 컨텍스트 % 계산에서 제외하는 기본 오버헤드 토큰
+FOLDER_BOTS_PATH = os.path.expanduser("~/.config/folder-bot/bots.json")
+
+
+def _folder_bots():
+    """folder-bot 플러그인의 봇 정본(bots.json). 미설치·파손이면 빈 dict."""
+    try:
+        with open(FOLDER_BOTS_PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
 
 
 def _pid_alive(path):
@@ -238,6 +248,29 @@ def collect_bots(config):
                      "kind": "claude",
                      "used": (best or {}).get("used"),
                      "ts": (best or {}).get("ts"), "note": None})
+    # folder-bot 자동 발견 — ~/.config/folder-bot/bots.json에 등록된 폴더 봇은
+    # 이 config를 손대지 않아도 자동으로 행이 생긴다 (folder-bot 플러그인이 정본).
+    seen = {r["label"] for r in rows}
+    for name, fb in _folder_bots().items():
+        folder = _shorten_home(os.path.expanduser(fb.get("folder", "")))
+        if not folder or folder in seen:
+            continue
+        engine = fb.get("engine", "claude")
+        if engine == "claude":
+            best = max((s for s in snaps if (s.get("project_dir") or s.get("cwd")) == folder),
+                       key=lambda s: s.get("ts") or 0, default=None)
+            rows.append({"label": folder,
+                         "tag": (best or {}).get("model") or "Claude",
+                         "kind": "claude",
+                         "used": (best or {}).get("used"),
+                         "ts": (best or {}).get("ts"), "note": None})
+        elif engine == "codex":
+            bridge = os.path.expanduser(fb.get("bridge_dir", "~/codex-discord"))
+            alive = _pid_alive(os.path.join(bridge, f"data-{name}", "daemon.pid"))
+            used, ts, model = _codex_latest(os.path.expanduser(fb["folder"]))
+            rows.append({"label": folder, "tag": model or "Codex", "kind": "codex",
+                         "used": used, "ts": ts,
+                         "note": None if alive else "브리지 꺼짐"})
     return rows
 
 
