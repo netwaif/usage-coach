@@ -178,6 +178,17 @@ def _codex_latest(workdir):
             return None, mtime, None
         models = re.findall(r'"model":"([^"]+)"', tail)
         model = models[-1] if models else None
+        if model is None:
+            # model 키는 초기 턴(session_meta·turn_context)에 몰려 있어 큰 rollout에서는
+            # tail 창 밖으로 밀려난다 (collab 실측: 361KB 파일, 키는 100~146KB 지점) —
+            # tail에 없으면 전체를 한 번 읽어 찾는다 (5분 주기 1회라 비용 무시 가능).
+            try:
+                with open(path, "rb") as f:
+                    whole = f.read().decode("utf-8", "replace")
+                models = re.findall(r'"model":"([^"]+)"', whole)
+                model = models[-1] if models else None
+            except OSError:
+                pass
         for line in reversed(tail.splitlines()):
             if '"token_count"' not in line:
                 continue
