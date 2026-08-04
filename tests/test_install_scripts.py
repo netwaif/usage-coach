@@ -22,6 +22,8 @@ def test_install_writes_plist(tmp_path):
     assert data["Label"] == "com.usage-coach.dashboard"
     assert data["StartInterval"] == 300
     assert data["ProgramArguments"][1].endswith("discord_dash.py")
+    # launchd 기본 PATH엔 /usr/local/bin 이 없어 codexbar 호출이 죽는다 — 설치 시점 PATH 주입
+    assert data["EnvironmentVariables"]["PATH"] == os.environ["PATH"]
 
 def test_install_fails_without_webhook_config(tmp_path):
     (tmp_path / "Library/LaunchAgents").mkdir(parents=True)

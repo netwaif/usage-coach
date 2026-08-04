@@ -14,6 +14,9 @@ PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
 LABEL="com.usage-coach.dashboard"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 mkdir -p "$HOME/Library/LaunchAgents"
+# 설치 시점의 완전한 PATH를 굽는다 — launchd 기본 PATH에는 /usr/local/bin 등이 없어
+# coach.py의 codexbar 호출이 Errno 2로 죽는다 (2026-08-04 E2E 실측)
+PATH_ESC="${PATH//&/&amp;}"
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -23,6 +26,8 @@ cat > "$PLIST" <<EOF
     <string>$PYTHON_BIN</string>
     <string>$DIR/discord_dash.py</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>$PATH_ESC</string></dict>
   <key>StartInterval</key><integer>300</integer>
   <key>RunAtLoad</key><true/>
 </dict></plist>
