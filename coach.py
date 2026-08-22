@@ -35,7 +35,7 @@ WEEKLY_MINUTES = 10080   # 7일 윈도우. 가드는 이 윈도우만 본다(5h�
 # 라이브 조회 명령 (provider별 별도 — `--provider all`은 hang)
 LIVE_CMDS = {
     "claude": ["codexbar", "usage", "--provider", "claude", "--format", "json"],
-    "codex":  ["codexbar", "usage", "--provider", "codex", "--source", "cli", "--format", "json"],
+    "codex":  ["codexbar", "usage", "--provider", "codex", "--source", "oauth", "--format", "json"],  # 2026-08-22: cli 소스는 codex 0.149.0 app-server 변경으로 실패 → oauth
     "antigravity": ["codexbar", "usage", "--provider", "antigravity", "--format", "json"],
 }
 
