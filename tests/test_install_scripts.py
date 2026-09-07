@@ -3,8 +3,10 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).parent.parent / "scripts"
 
-def run(script, home):
+def run(script, home, os_name=None):
     env = dict(os.environ, HOME=str(home), DRY_RUN="1")
+    if os_name:
+        env["HARNESS_OS"] = os_name  # uname 대신 쓰는 테스트 override
     return subprocess.run(["bash", str(SCRIPTS / script)],
                           capture_output=True, text=True, env=env)
 
@@ -66,3 +68,32 @@ def test_statusline_tolerates_bad_input(tmp_path):
     r = subprocess.run(["bash", str(script)], input="not-json", capture_output=True,
                        text=True, env=dict(os.environ, HOME=str(tmp_path)))
     assert r.returncode == 0                          # statusline은 어떤 입력에도 죽지 않는다
+
+# ── 리눅스: launchd 대신 systemd 사용자 유닛(service+timer) ──
+def test_install_linux_writes_units(tmp_path):
+    _prep(tmp_path)
+    r = run("install.sh", tmp_path, "Linux")
+    assert r.returncode == 0, r.stderr
+    unit_dir = tmp_path / ".config/systemd/user"
+    svc = (unit_dir / "usage-coach-dashboard.service").read_text()
+    timer = (unit_dir / "usage-coach-dashboard.timer").read_text()
+    assert "discord_dash.py" in svc and "Type=oneshot" in svc
+    assert f'Environment="PATH={os.environ["PATH"]}"' in svc  # 설치 시점 PATH 주입(launchd와 같은 이유)
+    assert "OnUnitActiveSec=5min" in timer and "WantedBy=timers.target" in timer
+    assert not (tmp_path / "Library/LaunchAgents/com.usage-coach.dashboard.plist").exists()
+    assert "timer" in r.stdout
+
+def test_uninstall_linux_removes_units_and_keeps_config(tmp_path):
+    _prep(tmp_path)
+    run("install.sh", tmp_path, "Linux")
+    r = run("uninstall.sh", tmp_path, "Linux")
+    assert r.returncode == 0, r.stderr
+    unit_dir = tmp_path / ".config/systemd/user"
+    assert not (unit_dir / "usage-coach-dashboard.service").exists()
+    assert not (unit_dir / "usage-coach-dashboard.timer").exists()
+    assert (tmp_path / ".config/usage-coach/discord.json").exists()
+
+def test_install_unsupported_os_fails(tmp_path):
+    _prep(tmp_path)
+    r = run("install.sh", tmp_path, "FreeBSD")
+    assert r.returncode == 1 and "지원" in r.stderr
