@@ -1,11 +1,15 @@
 #!/bin/bash
-# Claude Code statusLine — 세션 스냅샷 기록자(대시보드 '봇 세션' 클로드 카드의 데이터원).
+# A Claude Code statusLine that records session snapshots — the source behind the
 #
-# 프로덕션 로컬 스크립트의 스냅샷 계약(~/.config/usage-coach/sessions/<sid>.json:
-# cwd·project_dir·model·used·ts)을 정본화한 것 (2026-08-05 E2E 3차 게이트 —
-# 정본화 전엔 저자 로컬 사설 스크립트라 신규 계정에서 클로드 카드가 영구 공백).
-# 의존성: python3 만 사용 (jq 불요 — 신규 계정 전제도구 최소화).
-# 어떤 입력에도 0으로 종료한다 — statusline 실패가 세션을 방해하면 안 된다.
+# dashboard's Claude rows under "bot sessions".
+#
+# This makes canonical the snapshot contract a local production script had
+# (~/.config/usage-coach/sessions/<sid>.json: cwd, project_dir, model, used, ts),
+# settled at the third end-to-end gate on 2026-08-05. Before that it lived in the
+# author's own private script, so on a fresh account the Claude card stayed
+# permanently blank.
+# Depends on python3 alone — no jq, to keep what a new account must install small.
+# Exits 0 whatever the input: a statusline failure must not disturb the session.
 input=$(cat)
 STATUSLINE_INPUT="$input" exec python3 - <<'PY'
 import json, os, sys, time

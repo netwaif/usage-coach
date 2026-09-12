@@ -6,7 +6,7 @@ SCRIPTS = Path(__file__).parent.parent / "scripts"
 def run(script, home, os_name=None):
     env = dict(os.environ, HOME=str(home), DRY_RUN="1")
     if os_name:
-        env["HARNESS_OS"] = os_name  # uname 대신 쓰는 테스트 override
+        env["HARNESS_OS"] = os_name  # the test override, used instead of uname
     return subprocess.run(["bash", str(SCRIPTS / script)],
                           capture_output=True, text=True, env=env)
 
@@ -24,7 +24,7 @@ def test_install_writes_plist(tmp_path):
     assert data["Label"] == "com.usage-coach.dashboard"
     assert data["StartInterval"] == 300
     assert data["ProgramArguments"][1].endswith("discord_dash.py")
-    # launchd 기본 PATH엔 /usr/local/bin 이 없어 codexbar 호출이 죽는다 — 설치 시점 PATH 주입
+    # launchd's default PATH has no /usr/local/bin, so the codexbar call dies — the PATH at install time is baked in
     assert data["EnvironmentVariables"]["PATH"] == os.environ["PATH"]
 
 def test_install_fails_without_webhook_config(tmp_path):
@@ -43,8 +43,10 @@ def test_uninstall_removes_plist_and_keeps_config(tmp_path):
 
 
 def test_statusline_writes_snapshot_and_renders(tmp_path):
-    # 대시보드 '봇 세션' 클로드 카드의 데이터원 — statusLine 훅이 세션 스냅샷을 남긴다
-    # (2026-08-05 E2E: 정본화 전엔 저자 로컬 사설 스크립트라 신규 계정에서 카드가 영구 공백)
+    # The source behind the dashboard's Claude rows under "bot sessions" — the
+    # statusLine hook leaves session snapshots (end to end, 2026-08-05: before this
+    # was made canonical it lived in the author's private script, so the card stayed
+    # permanently blank on a fresh account)
     script = Path(__file__).parent.parent / "scripts/statusline-command.sh"
     payload = json.dumps({
         "session_id": "sess-1234",
@@ -56,7 +58,7 @@ def test_statusline_writes_snapshot_and_renders(tmp_path):
     r = subprocess.run(["bash", str(script)], input=payload, capture_output=True,
                        text=True, env=dict(os.environ, HOME=str(tmp_path)))
     assert r.returncode == 0, r.stderr
-    assert "Opus 5 (1M context)" in r.stdout          # statusline 표시
+    assert "Opus 5 (1M context)" in r.stdout          # what the statusline shows
     snap = json.loads((tmp_path / ".config/usage-coach/sessions/sess-1234.json").read_text())
     assert snap["model"] == "Opus 5 (1M context)"
     assert snap["project_dir"] == str(tmp_path / "discord-harness")
@@ -67,9 +69,9 @@ def test_statusline_tolerates_bad_input(tmp_path):
     script = Path(__file__).parent.parent / "scripts/statusline-command.sh"
     r = subprocess.run(["bash", str(script)], input="not-json", capture_output=True,
                        text=True, env=dict(os.environ, HOME=str(tmp_path)))
-    assert r.returncode == 0                          # statusline은 어떤 입력에도 죽지 않는다
+    assert r.returncode == 0                          # the statusline survives any input
 
-# ── 리눅스: launchd 대신 systemd 사용자 유닛(service+timer) ──
+# ── Linux: a systemd user unit (service plus timer) instead of launchd ──
 def test_install_linux_writes_units(tmp_path):
     _prep(tmp_path)
     r = run("install.sh", tmp_path, "Linux")
@@ -78,7 +80,7 @@ def test_install_linux_writes_units(tmp_path):
     svc = (unit_dir / "usage-coach-dashboard.service").read_text()
     timer = (unit_dir / "usage-coach-dashboard.timer").read_text()
     assert "discord_dash.py" in svc and "Type=oneshot" in svc
-    assert f'Environment="PATH={os.environ["PATH"]}"' in svc  # 설치 시점 PATH 주입(launchd와 같은 이유)
+    assert f'Environment="PATH={os.environ["PATH"]}"' in svc  # the PATH at install time, for the same reason as launchd
     assert "OnUnitActiveSec=5min" in timer and "WantedBy=timers.target" in timer
     assert not (tmp_path / "Library/LaunchAgents/com.usage-coach.dashboard.plist").exists()
     assert "timer" in r.stdout
@@ -96,4 +98,4 @@ def test_uninstall_linux_removes_units_and_keeps_config(tmp_path):
 def test_install_unsupported_os_fails(tmp_path):
     _prep(tmp_path)
     r = run("install.sh", tmp_path, "FreeBSD")
-    assert r.returncode == 1 and "지원" in r.stderr
+    assert r.returncode == 1 and "unsupported OS" in r.stderr

@@ -1,56 +1,82 @@
-# codexbar usage JSON — 입력 스키마 (1부 코어용)
+# codexbar's usage JSON — the input schema (for the part-one core)
 
-실측 확보 2026-06-25 (usage-test pane, codexbar 2.1.191). 샘플 원본 = `usage-samples/{claude,codex,gemini}.json`.
+Captured from a real run on 2026-06-25 (the usage-test pane, codexbar 2.1.191).
+The originals are in `usage-samples/{claude,codex,gemini}.json`.
 
-## 조회 명령 (provider별 별도 — `--provider all`은 hang)
+## Query commands (one per provider — `--provider all` hangs)
 ```bash
 codexbar usage --provider claude  --format json --pretty
-codexbar usage --provider codex --source oauth --format json --pretty   # 2026-08-22부터 oauth (cli 소스는 codex 0.149.0 app-server 변경으로 실패)
+codexbar usage --provider codex --source oauth --format json --pretty   # oauth since 2026-08-22 (the cli source broke on codex 0.149.0's app-server change)
 codexbar usage --provider gemini --source api --format json --pretty
 ```
-- ⚠️ `codexbar --provider all` = **hang 확인됨**(중단 필요). provider별로 따로 받아 합칠 것.
-- ⚠️ codex는 `--source oauth`(2026-08-22). 이전 `--source cli`는 codex 0.149.0에서 "codex app-server closed stdout"로 실패. oauth는 7d 창만 준다(5h 없음).
+- ⚠️ `codexbar --provider all` **hangs — confirmed**, and has to be interrupted.
+  Fetch each provider separately and combine.
+- ⚠️ codex needs `--source oauth` (2026-08-22). The earlier `--source cli` fails
+  on codex 0.149.0 with "codex app-server closed stdout". oauth gives the 7d
+  window only, with no 5h.
 
-## 공통 스키마 (provider당 배열 1원소)
+## The shared schema (one array element per provider)
 ```jsonc
 {
   "provider": "claude|codex|gemini",
   "source": "web|codex-cli|api",
-  "version": "...",            // gemini엔 없음
+  "version": "...",            // absent for gemini
   "usage": {
     "accountEmail": "...",
     "loginMethod": "Claude Pro|plus|Free",
     "primary":   { "usedPercent": N, "windowMinutes": M, "resetsAt": "ISO8601Z", "resetDescription": "..." },
     "secondary": { ... } | null,
     "tertiary":  { ... } | null,
-    "extraRateWindows": [ { "id","title","window":{usedPercent,windowMinutes} } ],  // claude만. Max 구독은 "Fable only"(id=claude-weekly-scoped-fable, 7일) 포함 — coach가 표시 전용 라인으로 노출(판정 미반영). 기본 구독엔 없음
+    "extraRateWindows": [ { "id","title","window":{usedPercent,windowMinutes} } ],  // claude only. A Max subscription includes "Fable only" (id=claude-weekly-scoped-fable, seven days), which coach shows as a display-only line and keeps out of the decision. Absent from a standard subscription
     "providerCost": { "limit","used","currencyCode","period" },                      // claude
     "updatedAt": "ISO8601Z"
   },
-  "credits": { "remaining": N, "events": [] }   // codex만
+  "credits": { "remaining": N, "events": [] }   // codex only
 }
 ```
-잔량% = `100 - usedPercent`. reset까지 = `resetsAt - now`.
+The percentage left is `100 - usedPercent`; the time to reset is `resetsAt - now`.
 
-## ★ 핵심 발견 (설계 제약)
+## ★ The findings that constrain the design
 
-**1. 윈도우는 `windowMinutes`로 분류해야 함 (primary/secondary 위치 가정 금지).**
-| windowMinutes | 의미 |
+**1. Windows must be classified by `windowMinutes`. Never assume anything from
+the primary/secondary position.**
+
+| windowMinutes | meaning |
 |---|---|
-| 300 | 5시간 |
-| 10080 | 7일 (7×1440) |
-| 1440 | 1일 (Gemini) |
+| 300 | 5 hours |
+| 10080 | 7 days (7×1440) |
+| 1440 | 1 day (Gemini) |
 
-**2. provider마다 윈도우 구성이 다름:**
-- **Claude(Pro)**: primary=5h, secondary=7d. → A~D 교차분석 그대로 적용 가능.
-- **Codex(plus)**: primary=5h, secondary=7d, +`credits.remaining`. → 동일 적용.
-- **Gemini(Free, 별도 계정)**: primary/secondary/tertiary **모두 1440(일일)**. 5h/7d 개념 없음. → **제외 아님. "daily 윈도우" 트랙으로 별도 취급.** reset 시각은 유효(secondary/tertiary `resetsAt`=익일, "Resets in 23h 59m"). daily는 주기 짧아 **5h와 같은 use-it-or-lose-it(소진) 성격** — reset 임박+잔량多면 "오늘 안에 소진" 권고(A의 daily 버전). 페이스 관리(7d)보다는 소진.
-  - ⚠️ title 라벨 없음(claude의 extraRateWindows엔 title 있음). secondary/tertiary 동일 resetsAt → 사실상 같은 일일 reset으로 묶어 처리.
+**2. The window layout differs per provider:**
 
-**3. 무효 데이터 가드 필수:**
-- Gemini **primary만** `resetsAt: "1970-01-01T00:00:00Z"` + `usedPercent: 100` = placeholder/무효 → 스킵. (secondary/tertiary는 유효하니 그걸 daily 기준으로 사용.) epoch·비정상 reset은 일괄 스킵.
+- **Claude (Pro)**: primary=5h, secondary=7d. The A-to-D cross-reading applies as
+  written.
+- **Codex (plus)**: primary=5h, secondary=7d, plus `credits.remaining`. The same
+  again.
+- **Gemini (Free, a separate account)**: primary, secondary and tertiary are
+  **all 1440, daily**. It has no notion of 5h or 7d. → **Not excluded. Handled on
+  its own "daily window" track.** The reset times are valid (secondary and
+  tertiary `resetsAt` are the next day, "Resets in 23h 59m"). Being short, daily
+  has **the same use-it-or-lose-it character as 5h**: with a reset close and a lot
+  left, the advice is to spend it today — case A, in its daily form. It is about
+  spending, not about pace the way 7d is.
+  - ⚠️ No title label (claude's extraRateWindows has one). A secondary and
+    tertiary sharing a resetsAt are the same daily reset in practice and are
+    folded together.
 
-## A~D 권고 로직에의 함의
-- 입력 정규화: provider별 JSON → `{provider, windows: [{kind: 5h|7d|daily, leftPercent, minutesToReset}]}` 형태로 windowMinutes 기준 매핑.
-- 5h = use-it-or-lose-it(소진), 7d = 페이스 관리. daily(Gemini)는 둘 사이 성격 — 설계 시 판단.
-- reset 임박 동적판정: `minutesToReset` 안에 `leftPercent`를 다 못 쓸 양이면 "소진 권고".
+**3. Guarding against invalid data is required:**
+
+- Gemini's **primary only** comes as `resetsAt: "1970-01-01T00:00:00Z"` with
+  `usedPercent: 100` — a placeholder, and invalid, so it is skipped. The secondary
+  and tertiary are valid and are what the daily figure comes from. Any epoch or
+  otherwise nonsensical reset is skipped the same way.
+
+## What this means for the A-to-D recommendation logic
+
+- Normalise the input: each provider's JSON becomes
+  `{provider, windows: [{kind: 5h|7d|daily, leftPercent, minutesToReset}]}`,
+  mapped by windowMinutes.
+- 5h is use-it-or-lose-it; 7d is pace. Gemini's daily sits between the two — a
+  judgement for the design.
+- Deciding an imminent reset dynamically: if `leftPercent` is more than can be
+  spent within `minutesToReset`, advise spending it.

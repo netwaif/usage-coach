@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""usage-coach Discord 대시보드 — coach --json 출력을 Components V2 메시지
-(provider별 컨테이너 + 유니코드 게이지 바)로 조립해 디스코드 웹훅 메시지 하나를
-계속 편집(업서트)한다. level이 나빠지면 새 메시지로 핑.
+"""The usage-coach Discord dashboard — assembles `coach --json` into a
+Components V2 message, a container per provider with a Unicode gauge bar, and
+keeps editing (upserting) one webhook message. A level getting worse pings as a
+new message.
 
-실행: LaunchAgent가 주기 실행(기본 5분). 수동 검증은 --out 으로 JSON만.
-설정: ~/.config/usage-coach/discord.json {"webhook_url": "..."} 또는 env DISCORD_WEBHOOK_URL
-상태: ~/.config/usage-coach/discord-state.json {"message_id", "last_levels"}
+Run by a LaunchAgent on a schedule, every five minutes by default. For a manual
+check, --out writes the JSON and nothing else.
+Config: ~/.config/usage-coach/discord.json {"webhook_url": "..."}, or the
+DISCORD_WEBHOOK_URL environment variable.
+State: ~/.config/usage-coach/discord-state.json {"message_id", "last_levels"}
 
-전부 네이티브 텍스트라 데스크톱·모바일 어느 폭에서도 선명하다(이전 PNG 카드는
-세로가 길수록 통째로 축소돼 데스크톱에서 깨알이 됐다). 웹훅으로 components를
-보낼 때는 URL에 ?with_components=true 가 없으면 필드가 무시된다(50006).
+All of it is native text, so it stays sharp at any width on desktop and mobile.
+The PNG card this replaced was scaled down as a whole the taller it got, which
+made it unreadable on a desktop. Sending components through a webhook needs
+?with_components=true in the URL, or the fields are ignored (50006).
 """
 import argparse
 import glob
@@ -23,7 +27,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-import coach as coachmod   # 판정 정책 재사용(classify 등) — 정본은 coach
+import coach as coachmod   # reuses the decision policy (classify and the rest) — coach is canonical
 
 COACH = Path(__file__).with_name("coach.py")
 CONFIG_PATH = os.path.expanduser("~/.config/usage-coach/discord.json")
@@ -32,31 +36,34 @@ SESSIONS_DIR = os.path.expanduser("~/.config/usage-coach/sessions")
 USERNAME = "dashboard"
 FLAG_COMPONENTS_V2 = 32768   # 1 << 15
 
-# level -> (색, 이모지, 종합 한 줄) — coach.py의 order/verdict와 동일 축
+# level -> (colour, emoji, the overall line) — the same axis as coach.py's order and verdict
 LEVELS = {
-    "red":    ("#F04747", "🔴", "주간 한도부터 챙기세요"),
-    "yellow": ("#FAA61A", "🟡", "큰 작업은 미루세요"),
-    "wait":   ("#7C8AFF", "⏳", "잠깐 기다리면 풀로 가능"),
-    "white":  ("#9AA4B2", "⚪", "평소대로"),
-    "green":  ("#43B581", "🟢", "큰 작업 OK"),
+    "red":    ("#F04747", "🔴", "mind the weekly limit first"),
+    "yellow": ("#FAA61A", "🟡", "hold the big jobs"),
+    "wait":   ("#7C8AFF", "⏳", "wait and you get the lot"),
+    "white":  ("#9AA4B2", "⚪", "carry on"),
+    "green":  ("#43B581", "🟢", "a big job is fine"),
 }
-SEVERITY = {"red": 0, "yellow": 1, "wait": 2, "white": 3, "green": 4}   # 낮을수록 나쁨
-# 게이지 라벨 — 코드 스팬 안에서 바와 정렬돼야 하므로 ASCII만(한글은 클라이언트별
-# 고정폭 폭이 달라 줄이 어긋난다)
+SEVERITY = {"red": 0, "yellow": 1, "wait": 2, "white": 3, "green": 4}   # lower is worse
+# Gauge labels — ASCII only, because they have to line up with the bar inside a
+# code span and a CJK character's monospace width differs between clients, which
+# shears the row
 WIN_CODE = {"5h": "5h", "7d": "7d", "daily": "1d", "fable_7d": "Fable", "gemini": "Gemini"}
-# provider 브랜드색 — 평상시 컨테이너 accent. 위험(red/yellow/wait)이면 level 색이 덮는다
+# Provider brand colours, the container accent in the quiet case. Anything at
+# risk — red, yellow, wait — is overridden by the level colour
 PROV_HEX = {"claude": "#E5B567", "codex": "#7ED5F5", "antigravity": "#C89BF0"}
-# 헤더 점도 같은 규칙 — 이모지 팔레트 한계 내의 브랜드 근사색
+# The header dot follows the same rule, approximating the brand within what the
+# emoji palette allows
 PROV_EMOJI = {"claude": "🟠", "codex": "🔵", "antigravity": "🟣"}
 
 
-# ---------------------------------------------------------------- coach 호출
+# ------------------------------------------------------------- calling coach
 
 def fetch_payload(extra_args):
     cmd = [sys.executable, str(COACH), "--json", "--once"] + extra_args
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     if out.returncode != 0 or not out.stdout.strip():
-        raise RuntimeError(f"coach --json 실패 (exit {out.returncode}): {out.stderr.strip()[:200]}")
+        raise RuntimeError(f"coach --json failed (exit {out.returncode}): {out.stderr.strip()[:200]}")
     return json.loads(out.stdout)
 
 
@@ -66,8 +73,9 @@ def provider_order(provs):
 
 
 def fetch_all_accounts(provider):
-    """전 계정을 coach 정책으로 계정별 판정(antigravity는 coach가 Gemini 풀만 남김).
-    여유 있는 순(level 좋은 순 → 잔량 큰 순)으로 정렬해 반환."""
+    """Decides every account by coach's own policy, one at a time — for
+    antigravity, coach keeps only the Gemini pool. Returned sorted by how much
+    room each has: best level first, then most left."""
     accounts = []
     for usage in coachmod.fetch_live_all(provider):
         emoji, action, detail = coachmod.classify(provider, usage)
@@ -96,8 +104,9 @@ def fetch_all_accounts(provider):
 
 
 def merge_all_accounts(payload, providers, config):
-    """all_accounts 대상 provider를 계정별 조회로 채운다. 대표(best) 계정 필드를
-    평탄화해 두므로 content·핑·카드 헤더는 단일 계정과 동일하게 동작한다."""
+    """Fills in an all_accounts provider from the per-account queries. The best
+    account's fields are flattened up, so the content, the ping and the card
+    header behave exactly as they do for a single account."""
     for prov in providers:
         try:
             accounts = fetch_all_accounts(prov)
@@ -117,10 +126,11 @@ def _primary_window(windows):
     return next(iter(windows), None)
 
 
-# ---------------------------------------------------------------- 디스코드 브리지 세션
+# --------------------------------------------------- Discord bridge sessions
 
-# 디스코드에 붙어 있는 봇들 — 봇마다 한 행(폴더 경로 [봇/모델] ctx%)으로 표시.
-# 브리지 봇은 config "bridges", 클로드 봇은 "claude_bots"로 교체 가능.
+# The bots attached to Discord — one row each: the folder path, [bot/model], ctx%.
+# Bridge bots can be replaced through the config's "bridges", Claude bots through
+# "claude_bots".
 DEFAULT_BRIDGES = [
     {"name": "Codex", "kind": "codex", "dir": "~/ai-folder/dev/codex-discord/data",
      "env": "~/ai-folder/dev/codex-discord/.env"},
@@ -128,16 +138,17 @@ DEFAULT_BRIDGES = [
      "env": "~/ai-folder/dev/codex-discord/.env.gemini"},
 ]
 CLAUDE_BOTS_DEFAULT = [
-    {"name": "Claude", "kind": "claude", "cwd": "~/ai-folder/dev/discord-multiagent"},  # 오케 봇
-    {"name": "Claude", "kind": "claude", "cwd": "~/VSCodeWorkspace/discord"},           # 수다 클로드 봇
+    {"name": "Claude", "kind": "claude", "cwd": "~/ai-folder/dev/discord-multiagent"},  # the orchestrator bot
+    {"name": "Claude", "kind": "claude", "cwd": "~/VSCodeWorkspace/discord"},           # the chat Claude bot
 ]
 CODEX_SESSIONS_ROOT = os.path.expanduser("~/.codex/sessions")
-CODEX_BASELINE = 12000   # codex TUI가 컨텍스트 % 계산에서 제외하는 기본 오버헤드 토큰
+CODEX_BASELINE = 12000   # the overhead tokens the codex TUI leaves out of its context %
 FOLDER_BOTS_PATH = os.path.expanduser("~/.config/folder-bot/bots.json")
 
 
 def _folder_bots():
-    """folder-bot 플러그인의 봇 정본(bots.json). 미설치·파손이면 빈 dict."""
+    """The folder-bot plugin's canonical bot list (bots.json). An empty dict when
+    it is not installed, or is broken."""
     try:
         with open(FOLDER_BOTS_PATH) as f:
             return json.load(f)
@@ -155,10 +166,12 @@ def _pid_alive(path):
 
 
 def _codex_latest(workdir):
-    """workdir에서 가장 최근 활동한 codex 세션(TUI 포함) -> (used%, ts, model).
+    """The most recently active codex session in `workdir`, the TUI included ->
+    (used%, ts, model).
 
-    exec/TUI 어느 쪽이든 rollout의 session_meta cwd로 판별한다. used%는 codex TUI와
-    같은 식(baseline 오버헤드 제외): (total - 12000) / (window - 12000)."""
+    exec and TUI alike are identified by the rollout's session_meta cwd. used% is
+    computed the way the codex TUI does it, leaving the baseline overhead out:
+    (total - 12000) / (window - 12000)."""
     files = glob.glob(os.path.join(CODEX_SESSIONS_ROOT, "*", "*", "*", "*.jsonl"))
     files.sort(key=os.path.getmtime, reverse=True)
     for path in files[:400]:
@@ -179,9 +192,11 @@ def _codex_latest(workdir):
         models = re.findall(r'"model":"([^"]+)"', tail)
         model = models[-1] if models else None
         if model is None:
-            # model 키는 초기 턴(session_meta·turn_context)에 몰려 있어 큰 rollout에서는
-            # tail 창 밖으로 밀려난다 (collab 실측: 361KB 파일, 키는 100~146KB 지점) —
-            # tail에 없으면 전체를 한 번 읽어 찾는다 (5분 주기 1회라 비용 무시 가능).
+            # The model key sits in the opening turns (session_meta, turn_context),
+            # so in a large rollout it falls outside the tail window — measured on
+            # collab: a 361KB file with the key between 100KB and 146KB. When the
+            # tail does not have it, the whole file is read once, which costs
+            # nothing at a five-minute period.
             try:
                 with open(path, "rb") as f:
                     whole = f.read().decode("utf-8", "replace")
@@ -219,12 +234,12 @@ def _fmt_age(ts):
         return None
     sec = max(0, time.time() - ts)
     if sec < 60:
-        return "방금"
+        return "just now"
     if sec < 3600:
-        return f"{int(sec // 60)}분 전"
+        return f"{int(sec // 60)}m ago"
     if sec < 86400:
-        return f"{int(sec // 3600)}시간 전"
-    return f"{int(sec // 86400)}일 전"
+        return f"{int(sec // 3600)}h ago"
+    return f"{int(sec // 86400)}d ago"
 
 
 def _shorten_home(path):
@@ -232,9 +247,11 @@ def _shorten_home(path):
 
 
 def collect_bots(config):
-    """디스코드 봇별 한 행: 작업 폴더 + ctx%(+ 마지막 활동). statusline 형식과 동일 축."""
+    """One row per Discord bot: the working folder and ctx%, plus when it was last
+    active. The same axis the statusline uses."""
     rows = []
-    # 브리지 봇(codex/gemini) — 폴더 = CODEX_WORKDIR, ctx·모델 = 최근 활동 세션 rollout
+    # Bridge bots (codex/gemini) — folder from CODEX_WORKDIR, ctx and model from
+    # the most recently active session's rollout
     for b in config.get("bridges", DEFAULT_BRIDGES):
         d = os.path.expanduser(b["dir"])
         workdir_abs = _env_var(b.get("env"), "CODEX_WORKDIR") or ""
@@ -245,13 +262,15 @@ def collect_bots(config):
         rows.append({"label": _shorten_home(workdir_abs) or "?",
                      "tag": model or b["name"], "kind": b["kind"],
                      "used": used, "ts": ts,
-                     "note": None if alive else "브리지 꺼짐"})
-    # 클로드 봇(오케 등) — statusline 스냅샷에서 해당 폴더의 최신 세션을 찾는다
+                     "note": None if alive else "bridge down"})
+    # Claude bots, the orchestrator among them — the newest session for that
+    # folder, out of the statusline snapshots
     snaps = load_sessions()
     for cb in config.get("claude_bots", CLAUDE_BOTS_DEFAULT):
         cwd = _shorten_home(os.path.expanduser(cb["cwd"]))
-        # project_dir(세션을 띄운 폴더) 우선 — 봇이 tasks/ 하위로 cd 해도 행이 끊기지 않는다.
-        # project_dir이 없는 옛 스냅샷은 cwd로 폴백.
+        # project_dir — the folder the session was started in — takes precedence,
+        # so a bot that cds into tasks/ does not lose its row. An older snapshot
+        # without project_dir falls back to cwd.
         best = max((s for s in snaps if (s.get("project_dir") or s.get("cwd")) == cwd),
                    key=lambda s: s.get("ts") or 0, default=None)
         rows.append({"label": cwd,
@@ -259,8 +278,9 @@ def collect_bots(config):
                      "kind": "claude",
                      "used": (best or {}).get("used"),
                      "ts": (best or {}).get("ts"), "note": None})
-    # folder-bot 자동 발견 — ~/.config/folder-bot/bots.json에 등록된 폴더 봇은
-    # 이 config를 손대지 않아도 자동으로 행이 생긴다 (folder-bot 플러그인이 정본).
+    # folder-bot discovery — a folder bot registered in
+    # ~/.config/folder-bot/bots.json gets a row without this config being touched.
+    # The folder-bot plugin is canonical for that list.
     seen = {r["label"] for r in rows}
     for name, fb in _folder_bots().items():
         folder = _shorten_home(os.path.expanduser(fb.get("folder", "")))
@@ -281,15 +301,16 @@ def collect_bots(config):
             used, ts, model = _codex_latest(os.path.expanduser(fb["folder"]))
             rows.append({"label": folder, "tag": model or "Codex", "kind": "codex",
                          "used": used, "ts": ts,
-                         "note": None if alive else "브리지 꺼짐"})
+                         "note": None if alive else "bridge down"})
     return rows
 
 
-# ---------------------------------------------------------------- 세션 스냅샷 (statusline이 기록)
+# ------------------------------- session snapshots, written by the statusline
 
 def load_sessions():
-    """statusline-command.sh가 남긴 로컬 Claude Code 세션 스냅샷 목록(48시간 지난 파일 청소).
-    표시 여부 판단은 호출부(collect_bots — 봇 폴더와 매칭되는 것만)."""
+    """The local Claude Code session snapshots statusline-command.sh leaves
+    behind, cleaning up anything older than 48 hours. What to show is the
+    caller's decision — collect_bots keeps only what matches a bot folder."""
     sessions, now = [], time.time()
     try:
         names = os.listdir(SESSIONS_DIR)
@@ -316,12 +337,12 @@ def load_sessions():
 def _ctx_emoji(used):
     if used >= 80:
         return "🔴"
-    if used >= 40:      # 사용자 마감 습관 기준 — 40%부터 주의
+    if used >= 40:      # from 40%, going by when people actually start wrapping up
         return "🟡"
     return "🟢"
 
 
-# ---------------------------------------------------------------- Components V2 조립
+# ------------------------------------------------- assembling Components V2
 
 BAR_W = 14
 
@@ -338,21 +359,24 @@ def _bar(pct):
 
 
 def _reset_rel(reset_min):
-    """<t:..:R> — 각 사용자 로컬 기준 '3시간 후'처럼 자동 표시."""
+    """<t:..:R> — Discord renders this as "in 3 hours" in each reader's own
+    locale and timezone."""
     if not reset_min:
         return None
     return f"<t:{int(time.time() + reset_min * 60)}:R>"
 
 
 def _accent_for(key, level):
-    """평상시 = 회사 브랜드색, 위험/대기(red·yellow·wait) = level 색."""
+    """The brand colour in the quiet case; the level colour for anything at risk
+    or waiting (red, yellow, wait)."""
     if level in ("red", "yellow", "wait"):
         return LEVELS[level][0]
     return PROV_HEX.get(key, LEVELS.get(level, ("#9AA4B2",))[0])
 
 
 def _win_emoji(pct):
-    """신호등 통일 — 평상시 🟢, 잔량 <50% 🟡, <25% 🔴 (미상 ⚪)."""
+    """One traffic light everywhere: 🟢 normally, 🟡 under 50% left, 🔴 under 25%,
+    ⚪ when it is unknown."""
     if pct is None:
         return "⚪"
     if pct < 25:
@@ -366,7 +390,7 @@ def _provider_container(key, p):
     if not p.get("ok"):
         return {"type": 17, "accent_color": _accent("#565B66"), "components": [
             {"type": 10,
-             "content": f"### {key.title()}\n⚠️ 조회 실패 — {str(p.get('error', ''))[:120]}"}]}
+             "content": f"### {key.title()}\n⚠️ query failed — {str(p.get('error', ''))[:120]}"}]}
     level = p.get("level")
     emoji = LEVELS.get(level, ("#9AA4B2", "⚪", ""))[1]
     if level in ("green", "white"):
@@ -387,7 +411,7 @@ def _provider_container(key, p):
                     f"**{'—' if pct is None else pct}%**")
             reset = _reset_rel(info.get("reset_min"))
             if reset:
-                line += f" · 리셋 {reset}"
+                line += f" · resets {reset}"
             lines.append(line)
     else:
         windows = p.get("windows", {})
@@ -398,7 +422,7 @@ def _provider_container(key, p):
                     f"**{'—' if pct is None else pct}%**")
             reset = _reset_rel(info.get("reset_min"))
             if reset:
-                line += f" · 리셋 {reset}"
+                line += f" · resets {reset}"
             lines.append(line)
     children = [{"type": 10, "content": head}]
     if lines:
@@ -422,12 +446,12 @@ def _bots_container(bots):
         if extra:
             line += f" · {extra}"
         rows.append(line)
-    # accent = 가장 빡빡한 세션의 ctx 색 (ctx 미상뿐이면 회색)
+    # The accent is the ctx colour of the tightest session; grey when every ctx is unknown
     worst = max((s["used"] for s in bots if s.get("used") is not None), default=None)
     color = ("#565B66" if worst is None else
              "#F04747" if worst >= 80 else "#FAA61A" if worst >= 40 else "#43B581")
     return {"type": 17, "accent_color": _accent(color), "components": [
-        {"type": 10, "content": "### 봇 세션"},
+        {"type": 10, "content": "### bot sessions"},
         {"type": 10, "content": "\n".join(rows)}]}
 
 
@@ -436,11 +460,11 @@ def build_components(payload, bots):
     comps = [_provider_container(key, provs[key]) for key in provider_order(provs)]
     if bots:
         comps.append(_bots_container(bots))
-    comps.append({"type": 10, "content": f"-# 갱신 <t:{int(time.time())}:R>"})
+    comps.append({"type": 10, "content": f"-# updated <t:{int(time.time())}:R>"})
     return comps
 
 
-# ---------------------------------------------------------------- 디스코드 웹훅
+# ---------------------------------------------------------- the Discord webhook
 
 def _request(url, method, payload_json):
     data = None if payload_json is None else json.dumps(payload_json,
@@ -464,7 +488,7 @@ def upsert_card(webhook, components, state, force_new=False):
         except urllib.error.HTTPError as e:
             if e.code not in (400, 404):
                 raise
-            if e.code == 400:   # V2 이전(PNG 카드) 메시지는 전환 편집 불가 → 지우고 새로
+            if e.code == 400:   # a pre-V2 message (the PNG card) cannot be edited into one → delete and repost
                 try:
                     _request(f"{webhook}/messages/{mid}", "DELETE", None)
                 except urllib.error.HTTPError:
@@ -476,7 +500,8 @@ def upsert_card(webhook, components, state, force_new=False):
 
 
 def ping_if_worse(webhook, payload, state):
-    """provider level이 yellow/red로 악화된 순간에만 새 메시지(푸시)."""
+    """A new message — a push — only at the moment a provider's level worsens to
+    yellow or red."""
     last = state.get("last_levels", {})
     now = {}
     for key, p in payload.get("providers", {}).items():
@@ -497,7 +522,7 @@ def ping_if_worse(webhook, payload, state):
     return now
 
 
-# ---------------------------------------------------------------- 설정·상태
+# ------------------------------------------------------- config and state
 
 def load_config():
     try:
@@ -532,20 +557,20 @@ def save_state(state):
 # ---------------------------------------------------------------- main
 
 def main():
-    ap = argparse.ArgumentParser(description="usage-coach 디스코드 대시보드 (Components V2)")
-    ap.add_argument("--out", metavar="PATH", help="컴포넌트 JSON만 저장(웹훅 미사용)")
-    ap.add_argument("--webhook", help="웹훅 URL(설정 파일보다 우선)")
-    ap.add_argument("--force-new", action="store_true", help="편집 대신 새 메시지 게시")
-    ap.add_argument("--mock", metavar="N", help="coach --mock 전달(1~5|all)")
+    ap = argparse.ArgumentParser(description="the usage-coach Discord dashboard (Components V2)")
+    ap.add_argument("--out", metavar="PATH", help="write the component JSON and nothing else, using no webhook")
+    ap.add_argument("--webhook", help="webhook URL, taking precedence over the config file")
+    ap.add_argument("--force-new", action="store_true", help="post a new message instead of editing")
+    ap.add_argument("--mock", metavar="N", help="passed to coach --mock (1-5|all)")
     ap.add_argument("--file", action="append", default=[], metavar="PATH:PROVIDER",
-                    help="coach --file 전달(반복 가능)")
-    ap.add_argument("--providers", help="coach --providers 전달")
+                    help="passed to coach --file (repeatable)")
+    ap.add_argument("--providers", help="passed to coach --providers")
     ap.add_argument("--account", action="append", default=[], metavar="PROVIDER:LABEL",
-                    help="coach --account 전달(반복 가능)")
+                    help="passed to coach --account (repeatable)")
     args = ap.parse_args()
 
     config = load_config()
-    extra = list(config.get("coach_args", []))   # 예: ["--account", "antigravity:foo@gmail.com"]
+    extra = list(config.get("coach_args", []))   # e.g. ["--account", "antigravity:foo@gmail.com"]
     if args.mock:
         extra += ["--mock", args.mock]
     for fspec in args.file:
@@ -553,8 +578,9 @@ def main():
     for aspec in args.account:
         extra += ["--account", aspec]
 
-    # all_accounts 대상 provider(기본 antigravity)는 coach 단일 조회에서 빼고
-    # codexbar --all-accounts로 전 계정을 따로 채운다 (mock/file 모드에선 미적용)
+    # An all_accounts provider — antigravity by default — is left out of coach's
+    # single query and filled in separately from codexbar --all-accounts. Not
+    # applied in mock or file mode.
     provs_csv = args.providers or "claude,codex,antigravity"
     live = not (args.mock or args.file)
     multi_provs = ([p for p in config.get("all_accounts", ["antigravity"])
@@ -574,13 +600,14 @@ def main():
     if args.out:
         Path(args.out).write_text(json.dumps(components, ensure_ascii=False, indent=1),
                                   encoding="utf-8")
-        print(f"컴포넌트 JSON 저장: {args.out}")
+        print(f"component JSON written: {args.out}")
         return 0
 
     webhook = load_webhook(args.webhook, config)
     if not webhook:
-        print("웹훅 URL이 없어요. ~/.config/usage-coach/discord.json 에 "
-              '{"webhook_url": "..."} 를 넣거나 --webhook 로 주세요.', file=sys.stderr)
+        print("no webhook URL. Put "
+              '{"webhook_url": "..."} in ~/.config/usage-coach/discord.json, '
+              "or pass --webhook.", file=sys.stderr)
         return 2
 
     state = load_state()

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""1부 사용량 코치 — codexbar 사용량을 읽어 '작업 크기 + 이유 + (필요시) 타이밍'을 권고.
+"""Part one, the usage coach — reads codexbar usage and advises a job size, the
+reason for it, and the timing when that matters.
 
-명세: docs/logic-design.md, docs/usage-schema.md
-출력: 터미널 CLI(색 + 메시지). 리프레쉬(watch) 기본 탑재.
+Spec: docs/logic-design.md, docs/usage-schema.md
+Output: a terminal CLI, colour and a message, with refresh (watch) built in.
 """
 import argparse
 import datetime as dt
@@ -17,38 +18,40 @@ import termios
 import tty
 import unicodedata
 
-# ── 튜닝 파라미터 (사용 패턴 따라 조정) ───────────────────────────────
-M = 0.10        # 페이스 마진 (left vs timeLeft 비교 여유)
-T_BIG = 0.40    # 큰 작업을 돌릴 5h/소진형 잔량 하한
-T_SOON = 30     # "초기화 임박" 판정 분(分)
-WATCH_INTERVAL = 30   # watch 모드 기본 자동 갱신 주기(초)
+# ── Tuning, to be adjusted to how you work ───────────────────────────
+M = 0.10        # pace margin: the slack when comparing left against timeLeft
+T_BIG = 0.40    # the 5h/burst floor below which a big job is not worth starting
+T_SOON = 30     # minutes within which a reset counts as "imminent"
+WATCH_INTERVAL = 30   # watch mode's default refresh period, in seconds
 
-# ── 2부 요금가드(--hook) 설정 ─────────────────────────────────────────
-# 훅은 임의 cwd에서 실행되므로 고정 절대경로에서 설정을 읽는다(없으면 기본값).
+# ── Part two, the rate guard (--hook) ────────────────────────────────
+# A hook runs from an arbitrary cwd, so the config comes from a fixed absolute
+# path, and the defaults apply when it is absent.
 GUARD_CONFIG_PATH = os.path.expanduser("~/.config/usage-coach/guard.json")
-# 벤더 무관 런타임 스위치. 존재=on, 부재=off (`coach guard on|off`로 토글).
+# One vendor-independent runtime switch. Present is on, absent is off;
+# `coach guard on|off` toggles it.
 GUARD_ENABLED_PATH = os.path.expanduser("~/.config/usage-coach/guard-enabled")
-GUARD_DEFAULT = {"m": 0.10, "floor": 0.10, "pace": True}   # provider별 기본: 페이스 마진 / 절대 하한 / 페이스 게이트 on
-GUARD_TARGETS = ["claude", "codex", "antigravity"]   # 가드 대상(gemini == antigravity)
-WEEKLY_MINUTES = 10080   # 7일 윈도우. 가드는 이 윈도우만 본다(5h는 무시).
+GUARD_DEFAULT = {"m": 0.10, "floor": 0.10, "pace": True}   # per provider: pace margin, absolute floor, pace gate on
+GUARD_TARGETS = ["claude", "codex", "antigravity"]   # what the guard covers (gemini == antigravity)
+WEEKLY_MINUTES = 10080   # the 7-day window. The guard looks at this one only, ignoring 5h.
 
-# 라이브 조회 명령 (provider별 별도 — `--provider all`은 hang)
+# Live query commands, one per provider — `--provider all` hangs
 LIVE_CMDS = {
     "claude": ["codexbar", "usage", "--provider", "claude", "--format", "json"],
-    "codex":  ["codexbar", "usage", "--provider", "codex", "--source", "oauth", "--format", "json"],  # 2026-08-22: cli 소스는 codex 0.149.0 app-server 변경으로 실패 → oauth
+    "codex":  ["codexbar", "usage", "--provider", "codex", "--source", "oauth", "--format", "json"],  # 2026-08-22: the cli source broke on codex 0.149.0's app-server change → oauth
     "antigravity": ["codexbar", "usage", "--provider", "antigravity", "--format", "json"],
 }
 
-# --account PROVIDER:LABEL 오버라이드 → codexbar --account 패스스루 (main에서 채움)
+# --account PROVIDER:LABEL override, passed through to codexbar --account (filled in from main)
 ACCOUNT_OVERRIDES = {}
 
-# ANSI 색 (emoji별). tty가 아니거나 NO_COLOR면 비활성.
+# ANSI colour, per emoji. Off when this is not a tty, or under NO_COLOR.
 _COLORS = {"🔴": "31", "🟢": "32", "⏳": "36", "🟡": "33", "⚪": "37"}
-# provider별 막대 색 (codexbar 메뉴 느낌)
+# Bar colour per provider, following the codexbar menu
 PROV_COLOR = {"claude": "33", "codex": "36", "antigravity": "35"}
-# windowMinutes -> 표시 이름
-WIN_NAME = {300: "5시간", 10080: "7일", 1440: "일일"}
-# Max 구독 전용 Fable 5 주간 한도의 extraRateWindows id (기본 구독 페이로드엔 없음)
+# windowMinutes -> display name
+WIN_NAME = {300: "5h", 10080: "7d", 1440: "daily"}
+# The extraRateWindows id of the Max-only Fable 5 weekly limit, absent from a standard payload
 FABLE_WIN_ID = "claude-weekly-scoped-fable"
 
 
@@ -68,7 +71,7 @@ _ANSI = re.compile(r"\033\[[0-9;]*m")
 
 
 def _w(s):
-    """문자열의 터미널 셀 폭(ANSI 제외, 한글=2)."""
+    """A string's width in terminal cells, ANSI excluded, CJK counted as two."""
     s = _ANSI.sub("", s)
     return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
 
@@ -78,7 +81,7 @@ def _pad(s, cells):
 
 
 def _row(left, right, width):
-    """left는 좌측, right는 우측 끝에 맞춰 정렬(가운데 공백 채움)."""
+    """`left` flush left and `right` flush right, spaces between them."""
     return left + " " * max(1, width - _w(left) - _w(right)) + right
 
 
@@ -88,21 +91,21 @@ def _bar(left_frac, code, n=12):
 
 
 def _dur(mins):
-    """남은 분 -> '4일 2시간' / '3시간 53분' / '12분'."""
+    """Minutes remaining -> `4d 2h` / `3h 53m` / `12m`."""
     mins = round(mins)
     d, rem = divmod(mins, 1440)
     h, m = divmod(rem, 60)
     if d:
-        return f"{d}일 {h}시간" if h else f"{d}일"
+        return f"{d}d {h}h" if h else f"{d}d"
     if h:
-        return f"{h}시간 {m}분" if m else f"{h}시간"
-    return f"{m}분"
+        return f"{h}h {m}m" if m else f"{h}h"
+    return f"{m}m"
 
 
 def _reset(mins):
     if mins is None:
-        return "사용 가능"
-    return "곧 초기화" if round(mins) < 1 else f"{_dur(mins)} 남음"
+        return "available"
+    return "resets now" if round(mins) < 1 else f"{_dur(mins)} left"
 
 
 def _term_w():
@@ -110,7 +113,7 @@ def _term_w():
 
 
 def _wrap(text, width, indent):
-    """text를 width 셀 폭에 맞춰 공백 단위로 줄바꿈. 각 줄 앞에 indent 부여."""
+    """Wraps `text` to `width` cells on spaces, indenting every line."""
     lines, cur = [], ""
     for word in text.split(" "):
         trial = f"{cur} {word}".strip()
@@ -125,13 +128,15 @@ def _wrap(text, width, indent):
 
 
 def windows_summary(usage):
-    """표시용 윈도우 목록 -> [(name, leftPct, mins)]. 무효 스킵.
+    """The windows to display -> [(name, leftPct, mins)]. Invalid ones are skipped.
 
-    같은 windowMinutes가 여러 개 오면(예: Claude 주간+Sonnet 주간+Daily, codexbar가
-    모델·기능별 하위 한도를 같은 7일로 줌) **가장 빡빡한(left 최소) 1개로 통합**한다.
-    제일 적게 남은 게 먼저 막히는 병목 → render·to_payload·classify(pick)가 같은
-    윈도우를 보게 해 중복 표시·불일치를 없앤다. (동일값 중복도 자연히 1개로 묶임.)"""
-    best, order = {}, []   # wm -> 가장 빡빡한 r, wm 첫 등장 순서
+    Several windows may share a windowMinutes — Claude weekly plus Sonnet weekly
+    plus Daily, because codexbar reports per-model and per-feature sub-limits
+    against the same seven days. They are **consolidated into the tightest one**:
+    whatever has least left is what blocks first, so render, to_payload and
+    classify(pick) all look at the same window, and nothing is shown twice or
+    disagrees. Exact duplicates collapse for free."""
+    best, order = {}, []   # wm -> the tightest r, and the order wm first appeared
     for k in ("primary", "secondary", "tertiary"):
         r = win(usage.get(k))
         if not r:
@@ -142,16 +147,18 @@ def windows_summary(usage):
             best[wm] = r
         elif r["left"] < best[wm]["left"]:
             best[wm] = r
-    return [(WIN_NAME.get(wm, f"{wm}분"), round(best[wm]["left"] * 100), best[wm]["mins"])
+    return [(WIN_NAME.get(wm, f"{wm}m"), round(best[wm]["left"] * 100), best[wm]["mins"])
             for wm in order]
 
 
 def fable_window(usage):
-    """extraRateWindows의 Fable 5 전용 주간 한도 -> (name, leftPct, mins) or None.
+    """The Fable 5 weekly limit from extraRateWindows -> (name, leftPct, mins) or None.
 
-    표시 전용 — classify(pick)·guard 판정에는 넣지 않는다(전체 주간 기준 유지).
-    기본 구독 페이로드엔 항목 자체가 없다 → None(라인 조용히 생략). id로만 식별해
-    Daily Routines 등 다른 extra 윈도우를 오인하지 않는다. 무효 윈도우는 win()이 스킵.
+    Display only — it is kept out of classify(pick) and the guard, which stay on
+    the whole weekly figure. A standard payload has no such entry at all, so this
+    answers None and the line is quietly omitted. Matched by id, so another extra
+    window such as Daily Routines is not mistaken for it. win() skips an invalid
+    window.
     """
     for e in usage.get("extraRateWindows") or []:
         if isinstance(e, dict) and e.get("id") == FABLE_WIN_ID:
@@ -166,15 +173,17 @@ def now_utc():
 
 
 def win(w):
-    """윈도우 dict -> {left, timeLeft, mins, wm} or None(무효: 필드 누락/epoch/파싱불가).
+    """A window dict -> {left, timeLeft, mins, wm}, or None when it is unusable —
+    a missing field, an epoch date, something unparseable.
 
-    codexbar가 windowMinutes/usedPercent/resetsAt를 null·누락으로 줄 때가 있어
-    (예: antigravity 간헐적) 그 윈도우는 스킵해 provider 전체 크래시를 막는다.
+    codexbar sometimes sends windowMinutes, usedPercent or resetsAt as null or
+    leaves them out (antigravity, intermittently), so that one window is skipped
+    rather than crashing the whole provider.
     """
     if not w:
         return None
     wm, up, rs = w.get("windowMinutes"), w.get("usedPercent"), w.get("resetsAt")
-    if not wm or up is None:   # 누락/null/0 → 스킵
+    if not wm or up is None:   # missing, null or 0 → skip
         return None
     if not rs:
         # codexbar may omit resetsAt when a short window is completely full.
@@ -186,16 +195,18 @@ def win(w):
         resets = dt.datetime.fromisoformat(rs.replace("Z", "+00:00"))
     except Exception:
         return None
-    if resets.year < 2000:   # epoch/placeholder 가드
+    if resets.year < 2000:   # guards against epoch and placeholder dates
         return None
     mins = max(0.0, (resets - now_utc()).total_seconds() / 60.0)
-    left = max(0.0, min(1.0, (100 - up) / 100.0))   # 범위 밖 입력 가드
+    left = max(0.0, min(1.0, (100 - up) / 100.0))   # guards against out-of-range input
     return {"left": left, "timeLeft": mins / wm, "mins": mins, "wm": wm}
 
 
 def pick(usage, minutes):
-    """windowMinutes로 윈도우 선택 — 같은 wm 여러 개면 가장 빡빡한(left 최소) 1개.
-    windows_summary와 같은 기준이라 render·json·classify가 동일 윈도우를 본다."""
+    """Selects a window by windowMinutes — the tightest when several share one.
+
+    The same rule windows_summary uses, so render, json and classify all see the
+    same window."""
     best = None
     for k in ("primary", "secondary", "tertiary"):
         r = win(usage.get(k))
@@ -205,75 +216,80 @@ def pick(usage, minutes):
 
 
 def classify(provider, usage):
-    """logic-design.md 출력 5종 분류. -> (emoji, action, detail).
-    action = 권장 작업 크기(헤드라인), detail = 이유 + (필요시) 타이밍. 코치 3원칙 유지.
+    """The five outputs of logic-design.md. -> (emoji, action, detail).
 
-    판정 순서(먼저 걸리는 것):
-      #1 🔴 7일(페이스형) 빠듯  → 주간 한도가 병목
-      #2 🟢 소진형(5h/일일) 넉넉(left>=T_BIG) → 큰 작업 기회
-      #3 ⏳ 소진형 부족 + 초기화 임박(mins<=T_SOON) → 잠깐 대기
-      #4 🟡 소진형 부족 + 페이스 뒤처짐(left<timeLeft-M) → 작은 작업만
-      #5 ⚪ 그 외(페이스에 맞게 사용 중) → 평소대로
-    충돌 해소: 5h·7d 둘 중 빡빡한 쪽이 상한 → 7일 빠듯(#1)이 5h 여유보다 우선.
-    예외: 소진형 윈도우가 아예 없는 페이스 전용 provider(Antigravity=주간만)는
-          7일 페이스만으로 🔴/🟢/⚪ 코칭(5h+7d 본 로직은 불변).
+    `action` is the recommended job size, the headline; `detail` is why, plus
+    the timing when that matters. The coach's three principles hold.
+
+    Decided in order, first match winning:
+      #1 🔴 the 7-day (pace) window is tight → the weekly limit is the bottleneck
+      #2 🟢 the burst window (5h/daily) is roomy (left>=T_BIG) → room for a big job
+      #3 ⏳ burst short, reset imminent (mins<=T_SOON) → wait a moment
+      #4 🟡 burst short, behind pace (left<timeLeft-M) → small jobs only
+      #5 ⚪ otherwise, keeping pace → carry on as usual
+    Conflicts: whichever of 5h and 7d is tighter sets the ceiling, so a tight
+    week (#1) outranks a roomy 5h.
+    Exception: a pace-only provider with no burst window at all — Antigravity is
+    weekly only — is coached 🔴/🟢/⚪ from the 7-day pace alone. The 5h+7d logic
+    below is unchanged.
     """
-    seven = pick(usage, 10080)             # 7일(페이스형)
-    short = pick(usage, 300) or pick(usage, 1440)   # 소진형: 5h 또는 일일
+    seven = pick(usage, 10080)             # seven days, the pace window
+    short = pick(usage, 300) or pick(usage, 1440)   # the burst window: 5h or daily
 
-    # 소진형이 없는 페이스 전용 provider(예: Antigravity = 주간만) → 7일 페이스로 코칭
+    # A pace-only provider with no burst window (Antigravity, weekly only) is coached from the 7-day pace
     if not short:
         if not seven:
-            return (None, "데이터 부족", "표시할 한도 윈도우가 없어요.")
+            return (None, "no data", "there is no limit window to show.")
         wp = round(seven["left"] * 100)
         if seven["left"] < seven["timeLeft"] - M:
-            return ("🔴", "큰 작업은 미루세요",
-                    f"주간 한도가 빠듯해서(남은 {wp}%) 지금 크게 쓰면 주 후반에 막혀요. "
-                    f"꼭 필요한 것만 돌리세요.")
+            return ("🔴", "hold the big jobs",
+                    f"the weekly limit is tight, {wp}% left, so spending now blocks you "
+                    f"later in the week. Run only what you must.")
         if seven["left"] >= T_BIG:
-            return ("🟢", "큰 작업 돌려도 돼요",
-                    f"주간 한도가 {wp}% 남아 페이스에 여유 있어요. 평소보다 크게 써도 괜찮아요.")
-        return ("⚪", "평소대로 쓰세요",
-                f"주간 한도 {wp}% 남았고 페이스에 맞게 쓰는 중이라 여유 있어요.")
+            return ("🟢", "a big job is fine",
+                    f"{wp}% of the weekly limit is left, which is ahead of pace. Go bigger than usual.")
+        return ("⚪", "carry on as usual",
+                f"{wp}% of the weekly limit left and you are keeping pace, so there is room.")
 
     sp = round(short["left"] * 100)
 
-    # #1 — 7일 한도가 병목 (페이스형 있을 때만 판정 → Gemini 자동 스킵)
+    # #1 — the 7-day limit is the bottleneck (decided only where a pace window exists, so Gemini skips itself)
     if seven and seven["left"] < seven["timeLeft"] - M:
-        return ("🔴", "큰 작업은 미루세요",
-                f"7일 한도가 가장 빠듯해서(남은 {round(seven['left']*100)}%) 지금 크게 쓰면 "
-                f"주 후반에 막혀요. 꼭 필요한 작은 것만 돌리세요.")
+        return ("🔴", "hold the big jobs",
+                f"the 7-day limit is the tightest, {round(seven['left']*100)}% left, so spending "
+                f"now blocks you later in the week. Run only the small things you must.")
 
-    # #2 — 소진형 넉넉 → 큰 작업 기회
+    # #2 — the burst window is roomy, so there is room for a big job
     if short["left"] >= T_BIG:
-        long_ok = " 장기도 여유라" if seven else ""
-        return ("🟢", "지금 큰 작업 돌리세요",
-                f"단기 한도 {sp}% 남고{long_ok} 끊길 걱정 없어요. "
-                f"남기면 초기화로 사라지니 지금이 적기예요.")
+        long_ok = " and the long window has room too" if seven else ""
+        return ("🟢", "run the big job now",
+                f"{sp}% left on the short window{long_ok}, so nothing will cut you off. "
+                f"What you leave is lost at the reset, so this is the moment.")
 
-    # #3 — 소진형 부족 + 초기화 임박 → 잠깐 대기
+    # #3 — the burst window is short but resets soon, so wait a moment
     if short["mins"] <= T_SOON:
-        return ("⏳", "조금만 기다렸다 큰 작업",
-                f"단기 한도가 {sp}%뿐이지만 약 {_dur(short['mins'])} 뒤 "
-                f"초기화되면 풀로 쓸 수 있어요.")
+        return ("⏳", "wait a little, then go big",
+                f"only {sp}% is left on the short window, but it resets in about "
+                f"{_dur(short['mins'])} and you get the lot back.")
 
-    # #4 — 소진형 부족 + 페이스 뒤처짐 → 작은 작업만
+    # #4 — the burst window is short and behind pace, so small jobs only
     if short["left"] < short["timeLeft"] - M:
-        return ("🟡", "작은 작업으로 돌리세요",
-                f"단기 한도가 {sp}%라 큰 작업은 중간에 끊겨요. "
-                f"초기화까지 {_dur(short['mins'])} 남았어요.")
+        return ("🟡", "keep the jobs small",
+                f"the short window is at {sp}%, so a big job will be cut off part way. "
+                f"{_dur(short['mins'])} until it resets.")
 
-    # #5 — 그 외(페이스에 맞게 사용 중)
-    return ("⚪", "평소대로 쓰세요",
-            f"단기·장기 모두 페이스에 맞게(단기 {sp}%) 쓰는 중이라 여유 있어요. "
-            f"아주 큰 작업만 한 번 더 확인하세요.")
+    # #5 — otherwise, keeping pace
+    return ("⚪", "carry on as usual",
+            f"short and long are both on pace, short at {sp}%, so there is room. "
+            f"Give only a very large job a second look.")
 
 
-# ── 입력 소스 ─────────────────────────────────────────────────────────
+# ── Input sources ────────────────────────────────────────────────────
 def antigravity_gemini_only(usage):
-    """antigravity 2풀(Gemini=primary / Claude·GPT=secondary) 중 Gemini만 남긴다
-    — Claude·GPT 풀은 미사용이라 표시하면 소음. windowMinutes가 간헐적으로 빠진 채
-    오면 주간(10080)으로 보정한다(Antigravity 풀은 전부 Weekly Limit)."""
+    """Keeps only Gemini out of antigravity's two pools — Gemini is primary,
+    Claude and GPT secondary, and those two go unused, so showing them is noise.
+    windowMinutes occasionally arrives missing and is corrected to weekly
+    (10080): every Antigravity pool is a Weekly Limit."""
     u = dict(usage)
     p = u.get("primary")
     if isinstance(p, dict) and p.get("usedPercent") is not None:
@@ -284,11 +300,12 @@ def antigravity_gemini_only(usage):
 
 
 def fetch_live(provider):
-    """codexbar 라이브 조회 -> usage dict. 실패 시 예외.
+    """A live codexbar query -> a usage dict. Raises on failure.
 
-    start_new_session=True: codexbar가 우리 제어터미널/포그라운드 그룹을 가로채지
-    못하게 별도 세션으로 실행 → Ctrl-C(SIGINT)가 codexbar에 먹히지 않고 watch가 정상 종료.
-    stdin=DEVNULL: codexbar가 우리 입력을 읽지 않도록.
+    start_new_session=True runs it in a session of its own so it cannot take our
+    controlling terminal and foreground group: Ctrl-C (SIGINT) then does not
+    reach codexbar, and watch exits cleanly. stdin=DEVNULL keeps it from reading
+    our input.
     """
     cmd = list(LIVE_CMDS[provider])
     if provider in ACCOUNT_OVERRIDES:
@@ -296,19 +313,19 @@ def fetch_live(provider):
     out = subprocess.run(cmd, capture_output=True, text=True,
                          timeout=40, start_new_session=True, stdin=subprocess.DEVNULL)
     if out.returncode != 0:
-        raise RuntimeError((out.stderr or out.stdout or "조회 실패").strip().splitlines()[-1])
+        raise RuntimeError((out.stderr or out.stdout or "query failed").strip().splitlines()[-1])
     data = json.loads(out.stdout)
     usage = data[0]["usage"]
     return antigravity_gemini_only(usage) if provider == "antigravity" else usage
 
 
 def fetch_live_all(provider):
-    """codexbar --all-accounts -> 등록된 전 계정의 usage dict 리스트."""
+    """codexbar --all-accounts -> one usage dict per registered account."""
     cmd = list(LIVE_CMDS[provider]) + ["--all-accounts"]
     out = subprocess.run(cmd, capture_output=True, text=True,
                          timeout=120, start_new_session=True, stdin=subprocess.DEVNULL)
     if out.returncode != 0:
-        raise RuntimeError((out.stderr or out.stdout or "조회 실패").strip().splitlines()[-1])
+        raise RuntimeError((out.stderr or out.stdout or "query failed").strip().splitlines()[-1])
     usages = [e.get("usage") or {} for e in json.loads(out.stdout)]
     if provider == "antigravity":
         usages = [antigravity_gemini_only(u) for u in usages]
@@ -325,28 +342,30 @@ def _mock_window(left, mins, wm):
     return {"usedPercent": round((1 - left) * 100), "windowMinutes": wm, "resetsAt": resets}
 
 
-# 출력 5종을 의도적으로 띄우는 모킹 입력 (영상 촬영용 — 실제 한도를 다 못 칠 때)
+# Mock input that raises each of the five outputs on purpose, for filming, when
+# the real limits cannot all be reached
 def mock_usage(scenario):
-    """scenario '1'~'5' -> 해당 출력이 나오도록 구성한 usage dict."""
-    ok7 = _mock_window(0.80, 5040, 10080)   # 7일 여유 (left .8 > timeLeft .5)
+    """scenario '1' to '5' -> a usage dict shaped to produce that output."""
+    ok7 = _mock_window(0.80, 5040, 10080)   # a roomy week (left .8 > timeLeft .5)
     table = {
         # five(left,mins), seven
-        "1": (_mock_window(0.60, 200, 300),  _mock_window(0.20, 6048, 10080)),  # 🔴 7일 병목
-        "2": (_mock_window(0.70, 200, 300),  ok7),                              # 🟢 큰 작업 기회
-        "3": (_mock_window(0.20, 10,  300),  ok7),                              # ⏳ 초기화 임박
-        "4": (_mock_window(0.10, 180, 300),  ok7),                              # 🟡 페이스 뒤처짐
-        "5": (_mock_window(0.30, 75,  300),  ok7),                              # ⚪ 평소대로
+        "1": (_mock_window(0.60, 200, 300),  _mock_window(0.20, 6048, 10080)),  # 🔴 the week is the bottleneck
+        "2": (_mock_window(0.70, 200, 300),  ok7),                              # 🟢 room for a big job
+        "3": (_mock_window(0.20, 10,  300),  ok7),                              # ⏳ reset imminent
+        "4": (_mock_window(0.10, 180, 300),  ok7),                              # 🟡 behind pace
+        "5": (_mock_window(0.30, 75,  300),  ok7),                              # ⚪ carry on as usual
     }
     five, seven = table[scenario]
     return {"primary": five, "secondary": seven, "tertiary": None}
 
 
-# ── 렌더링 ────────────────────────────────────────────────────────────
+# ── Rendering ────────────────────────────────────────────────────────
 def render(results):
-    """results: list[dict] -> 출력 문자열. provider별 기본 사용량 + 한 줄 권고(정렬·구분선)."""
+    """results: list[dict] -> the output string: usage per provider and a
+    one-line recommendation, aligned, with a rule between blocks."""
     W = max(46, min(_term_w() - 1, 62))
     div = _c("90", " " + "─" * (W - 1))
-    out = [_row(_c("1", " 사용량 코치"), _c("90", now_utc().astimezone().strftime("%H:%M")), W), ""]
+    out = [_row(_c("1", " usage coach"), _c("90", now_utc().astimezone().strftime("%H:%M")), W), ""]
 
     blocks = []
     for r in results:
@@ -359,16 +378,16 @@ def render(results):
         b = [_row(_c(f"1;{code}", f" {name}"), _c("90", meta), W)]
         wpad = max([5] + [_w(n) for n, _, _ in r["windows"]])
         for wname, pct, mins in r["windows"]:
-            if pct is None:            # 계정 행에서 미확인(윈도우 데이터 없음)
+            if pct is None:            # unknown on an account row (no window data)
                 left = f"   {_pad(wname, wpad)} {_bar(0, code)}    —"
-                b.append(_row(left, _c("90", "미확인"), W))
+                b.append(_row(left, _c("90", "unknown"), W))
                 continue
             left = f"   {_pad(wname, wpad)} {_bar(pct / 100, code)}  {pct:>3}%"
             b.append(_row(left, _c("90", _reset(mins)), W))
         if r["emoji"]:
             b.append("   " + _paint(r["emoji"], f"{r['emoji']} {r['action']}"))
-            b += _wrap(r["detail"], W, "      ")   # 이유·타이밍: 헤드라인 아래 정렬 줄바꿈
-        elif not r["windows"]:                     # 코칭 불가(윈도우 데이터 없음/불완전)
+            b += _wrap(r["detail"], W, "      ")   # why and when, wrapped and aligned under the headline
+        elif not r["windows"]:                     # no coaching possible: window data missing or incomplete
             b.append(_c("90", f"   · {r['detail']}"))
         blocks.append(b)
 
@@ -376,25 +395,29 @@ def render(results):
         out += b
         out.append(div if i < len(blocks) - 1 else "")
 
-    # 전체 종합 한 줄 — 가장 빡빡한(우선순위 높은) 케이스
+    # One overall line, for the tightest case by priority
     order = {"🔴": 0, "🟡": 1, "⏳": 2, "⚪": 3, "🟢": 4}
     valid = [(r["emoji"], r["label"].title()) for r in results if r["ok"] and r["emoji"]]
     if valid:
         we, wl = min(valid, key=lambda x: order.get(x[0], 9))
-        verdict = {"🔴": "주간 한도부터 챙기세요", "🟡": "큰 작업은 미루세요",
-                   "⏳": "잠깐 기다리면 풀로 가능", "⚪": "평소대로", "🟢": "큰 작업 OK"}[we]
-        out.append(_paint(we, f" 종합  {we} {wl} — {verdict}"))
+        verdict = {"🔴": "mind the weekly limit first", "🟡": "hold the big jobs",
+                   "⏳": "wait and you get the lot", "⚪": "carry on", "🟢": "a big job is fine"}[we]
+        out.append(_paint(we, f" overall  {we} {wl} — {verdict}"))
     return "\n".join(out)
 
 
-# emoji -> 안정적 level 문자열 / 윈도우 이름 -> JSON 키 (agent loop이 분기에 사용)
+# emoji -> a stable level string, and display name -> JSON key. The agent loop
+# branches on both, so neither may follow the display language: the three window
+# names happen to read the same in both now, and are still listed rather than
+# left to fall through, so renaming one on screen cannot silently rename a key.
 _LEVEL = {"🔴": "red", "🟢": "green", "⏳": "wait", "🟡": "yellow", "⚪": "white"}
-_WKEY = {"5시간": "5h", "7일": "7d", "일일": "daily", "Fable": "fable_7d", "Gemini": "gemini"}
+_WKEY = {"5h": "5h", "7d": "7d", "daily": "daily", "Fable": "fable_7d", "Gemini": "gemini"}
 
 
 def to_payload(results):
-    """agent loop용 머신 출력. 코칭 정보(action·reason 전문)를 손실 없이 담는다.
-    판단은 하지 않음(provider별 raw 정보만) — gate/종합 없음."""
+    """Machine output for the agent loop. Carries the coaching — action and
+    reason, in full — without loss. Makes no judgement of its own: raw
+    per-provider information, with no gate and no overall verdict."""
     provs = {}
     for r in results:
         if not r["ok"]:
@@ -404,9 +427,9 @@ def to_payload(results):
             "ok": True,
             "plan": r.get("plan"),
             "email": r.get("email"),
-            "level": _LEVEL.get(r["emoji"]),     # 코칭 불가 시 null
-            "action": r["action"],               # 권장 작업 크기 (전문)
-            "reason": r["detail"],               # 이유·타이밍 (전문, 그대로)
+            "level": _LEVEL.get(r["emoji"]),     # null when no coaching was possible
+            "action": r["action"],               # the recommended job size, in full
+            "reason": r["detail"],               # why and when, in full and unaltered
             "windows": {_WKEY.get(n, n): {"left_pct": p,
                                           "reset_min": None if m is None else round(m)}
                         for n, p, m in r["windows"]},
@@ -415,8 +438,9 @@ def to_payload(results):
 
 
 def load_usage(kind, arg):
-    """kind(live|live-all|file|mock) + arg -> usage dict. 실패 시 예외(호출부에서 처리).
-    live-all은 guard 등 단일 usage가 필요한 호출부에선 선택 계정 단일 조회로 축약."""
+    """kind (live|live-all|file|mock) + arg -> a usage dict. Raises on failure,
+    which the caller handles. For a caller that needs a single usage — the guard,
+    say — live-all is narrowed to one query against the selected account."""
     if kind in ("live", "live-all"):
         return fetch_live(arg)
     if kind == "file":
@@ -425,7 +449,8 @@ def load_usage(kind, arg):
 
 
 def gather_all_accounts(label):
-    """전 계정을 한 블록으로: 행 = 계정(라벨 = 이메일 @ 앞부분), 코칭 = 최여유 계정 기준."""
+    """Every account as one block: a row per account, labelled with the part of
+    the email before the @, coached from whichever account has most room."""
     order = {"🔴": 0, "🟡": 1, "⏳": 2, "⚪": 3, "🟢": 4}
     accounts = []
     for usage in fetch_live_all(label):
@@ -436,7 +461,7 @@ def gather_all_accounts(label):
                          "plan": usage.get("loginMethod"), "pct": pct, "mins": mins,
                          "emoji": emoji, "action": action, "detail": detail})
     if not accounts:
-        return {"label": label, "ok": False, "msg": "등록된 계정 없음"}
+        return {"label": label, "ok": False, "msg": "no registered account"}
     accounts.sort(key=lambda a: (-order.get(a["emoji"], -1),
                                  -(a["pct"] if a["pct"] is not None else -1)))
     best = accounts[0]
@@ -449,7 +474,7 @@ def gather_all_accounts(label):
 
 
 def gather_one(source):
-    """source(label, kind, arg) -> result dict 1개."""
+    """source(label, kind, arg) -> one result dict."""
     label, kind, arg = source
     try:
         if kind == "live-all":
@@ -457,11 +482,11 @@ def gather_one(source):
         usage = load_usage(kind, arg)
         emoji, action, detail = classify(label, usage)
         wins = windows_summary(usage)
-        if label == "antigravity":   # 2풀 중 Gemini만 표시 — 항목명도 실물대로
+        if label == "antigravity":   # only Gemini of the two pools, named as it really is
             wins = [("Gemini", pv, mv) for _n, pv, mv in wins]
         fable = fable_window(usage)
         if fable:
-            wins.append(fable)     # 표시 전용 추가 — classify에는 미반영
+            wins.append(fable)     # display only: classify does not see it
         return {
             "label": label, "ok": True,
             "email": usage.get("accountEmail"),
@@ -470,94 +495,104 @@ def gather_one(source):
             "emoji": emoji, "action": action, "detail": detail,
         }
     except subprocess.TimeoutExpired:
-        return {"label": label, "ok": False, "msg": "조회 시간초과(hang?) — 건너뜀"}
+        return {"label": label, "ok": False, "msg": "query timed out (hung?) — skipped"}
     except Exception as e:
-        return {"label": label, "ok": False, "msg": f"조회 실패: {e}"}
+        return {"label": label, "ok": False, "msg": f"query failed: {e}"}
 
 
 def gather(sources):
-    """sources: list[(label, kind, arg)] -> results(dict) 리스트. kind: live|live-all|file|mock.
+    """sources: list[(label, kind, arg)] -> a list of result dicts. kind is one
+    of live, live-all, file, mock.
 
-    순차 조회 고정 — codexbar는 동시 실행하면 잠금/행이 걸린다(실측: 병렬 2 인스턴스에서
-    hang·조회 실패, `--provider all` hang과 같은 계열). provider당 수십 초라 전체
-    45초~1분쯤 걸리지만 병렬화로 줄일 수 없는 codexbar 쪽 제약이다."""
+    Queried strictly in sequence: codexbar locks up or hangs when run
+    concurrently — measured, two parallel instances hang and the query fails, the
+    same family as the `--provider all` hang. At tens of seconds per provider the
+    whole run takes 45 seconds to a minute, and that is a codexbar constraint
+    parallelism cannot shorten."""
     return [gather_one(s) for s in sources]
 
 
-# ── 2부 요금가드 (command 훅 결정 모드) ───────────────────────────────
+# ── Part two, the rate guard (the command hook's decision mode) ──────
 def load_guard_config(path=GUARD_CONFIG_PATH):
-    """guard.json -> {provider: {m, floor, pace}}. 파일/키 누락은 GUARD_DEFAULT로 보완.
+    """guard.json -> {provider: {m, floor, pace}}. A missing file or key falls
+    back to GUARD_DEFAULT.
 
-    훅은 임의 cwd에서 돌아 상대경로가 안 통하므로 고정 절대경로에서 읽는다.
-    파싱 실패·파일 없음도 조용히 기본값 — 설정 오류로 작업을 죽이지 않는다(fail-open).
+    Read from a fixed absolute path, because a hook runs from an arbitrary cwd
+    and a relative one would not resolve. A parse failure or a missing file
+    quietly takes the defaults too: a configuration mistake must not kill
+    somebody's work, so this fails open.
     """
     try:
         with open(path) as f:
             raw = json.load(f)
     except Exception:
         raw = {}
-    if not isinstance(raw, dict):    # [] 등 dict 아닌 JSON → 기본값(fail-open)
+    if not isinstance(raw, dict):    # JSON that is not a dict, `[]` say → defaults, failing open
         raw = {}
 
     def _num(entry, key):
         try:
             return float(entry.get(key, GUARD_DEFAULT[key]))
-        except (TypeError, ValueError):   # "bad"/null 등 숫자 아닌 값 → 기본값
+        except (TypeError, ValueError):   # a non-numeric value, "bad" or null → default
             return GUARD_DEFAULT[key]
 
     def _pace(entry):
         v = entry.get("pace", GUARD_DEFAULT["pace"])
-        return v if isinstance(v, bool) else GUARD_DEFAULT["pace"]   # 깨진 값 → 기본 true
+        return v if isinstance(v, bool) else GUARD_DEFAULT["pace"]   # a broken value → the default, true
 
     cfg = {}
     for prov in GUARD_TARGETS:
         entry = raw.get(prov)
-        if entry is None and prov == "antigravity":   # gemini 별칭 허용
+        if entry is None and prov == "antigravity":   # `gemini` is accepted as an alias
             entry = raw.get("gemini")
-        if not isinstance(entry, dict):    # 누락/null/스칼라 → 기본값
+        if not isinstance(entry, dict):    # missing, null or a scalar → defaults
             entry = {}
         cfg[prov] = {"m": _num(entry, "m"), "floor": _num(entry, "floor"), "pace": _pace(entry)}
     return cfg
 
 
 def guard_check(sources, cfg):
-    """7일 윈도우 하이브리드 OR 가드. -> stopReason(str) 또는 None(통과).
+    """The hybrid OR guard on the 7-day window. -> a stopReason string, or None
+    to let the work through.
 
-    정지 조건(provider별, 하나라도 걸리면 정지):
-      left < timeLeft − m   (pace: 너무 빨리 태움 — pace:false면 건너뜀)
-      OR left < floor       (absolute: 바닥 임박)
-    fail-open: 조회 실패 / 7일 windowMinutes 없음 → 그 provider는 정지에 기여 안 함.
+    Either condition stops it, per provider:
+      left < timeLeft − m   (pace: burning it too fast — skipped when pace:false)
+      OR left < floor       (absolute: close to the bottom)
+    Fails open: a failed query, or no 7-day windowMinutes, means that provider
+    contributes nothing to a stop.
     """
     triggers = []
     for label, kind, arg in sources:
         try:
             usage = load_usage(kind, arg)
-            w = pick(usage, WEEKLY_MINUTES)     # 7일만 — 5h는 보지 않음
+            w = pick(usage, WEEKLY_MINUTES)     # the seven days only, never the 5h
         except Exception:
-            continue                            # 조회 실패 → fail-open
+            continue                            # the query failed → fail open
         if not w:
-            continue                            # 7일 윈도우 없음/무효 → fail-open
+            continue                            # no 7-day window, or an invalid one → fail open
         c = cfg.get(label, GUARD_DEFAULT)
         m, floor, pace = c["m"], c["floor"], c.get("pace", True)
-        # 7일 윈도우 리셋은 최대 7일 후 → timeLeft ≤ 1.0. 손상된 먼 미래 resetsAt가
-        # 폭주시켜 엉뚱하게 정지시키지 않도록 클램프(fail-open 철학).
+        # A 7-day window resets at most seven days out, so timeLeft ≤ 1.0. Clamped
+        # so a corrupted resetsAt far in the future cannot run away and stop work
+        # that was fine — the same fail-open principle.
         left, time_left, mins = w["left"], min(1.0, w["timeLeft"]), w["mins"]
-        # pace:false = "남은 쿼터 소진" — 페이스 조건을 건너뛰고 floor만 본다.
+        # pace:false means "spend what is left": skip the pace condition, keep the floor.
         if pace and left < time_left - m:
-            triggers.append(f"{label} 주간 페이스 초과 — 남은 {left*100:.0f}% "
-                            f"< 기준 {(time_left - m)*100:.0f}% (리셋 {_dur(mins)} 후)")
+            triggers.append(f"{label} is over its weekly pace — {left*100:.0f}% left "
+                            f"< {(time_left - m)*100:.0f}% expected (resets in {_dur(mins)})")
         elif left < floor:
-            triggers.append(f"{label} 주간 한도 바닥 임박 — 남은 {left*100:.0f}% "
-                            f"< 하한 {floor*100:.0f}%")
+            triggers.append(f"{label} is near the bottom of its weekly limit — "
+                            f"{left*100:.0f}% left < the {floor*100:.0f}% floor")
     if not triggers:
         return None
-    return "요금가드: " + " · ".join(triggers) + " → 작업을 멈추고 확인하세요."
+    return "rate guard: " + " · ".join(triggers) + " → stop and take a look."
 
 
 def read_hook_event():
-    """하니스가 stdin으로 주는 이벤트 JSON 소비(broken pipe 방지). 내용은 쓰지 않음.
+    """Consumes the event JSON the harness sends on stdin, to avoid a broken
+    pipe. Nothing is done with the content.
 
-    tty면 블로킹 read를 피하려고 건너뛴다(대화형 수동 테스트 안전).
+    Skipped on a tty so a blocking read cannot hang an interactive manual test.
     """
     if sys.stdin.isatty():
         return {}
@@ -569,79 +604,86 @@ def read_hook_event():
 
 
 def guard_enabled():
-    """런타임 스위치 상태. 플래그 파일 존재=on / 부재=off."""
+    """The runtime switch: the flag file being present is on, absent is off."""
     return os.path.exists(GUARD_ENABLED_PATH)
 
 
 def set_guard(on):
-    """런타임 스위치 토글. on→플래그 파일 생성(부모 mkdir 포함) / off→삭제.
+    """Toggles the runtime switch: on creates the flag file, making its parent
+    directory as needed, and off deletes it.
 
-    설정 디렉토리 권한 오류 등으로 작업을 죽이지 않도록 fail-open(조용히 무시).
+    Fails open and stays quiet, so a permissions problem on the config directory
+    cannot kill somebody's work.
     """
     try:
         if on:
             os.makedirs(os.path.dirname(GUARD_ENABLED_PATH), exist_ok=True)
-            open(GUARD_ENABLED_PATH, "a").close()   # 빈 플래그 파일 touch
+            open(GUARD_ENABLED_PATH, "a").close()   # touch an empty flag file
         else:
             try:
                 os.remove(GUARD_ENABLED_PATH)
             except FileNotFoundError:
-                pass                                # 이미 off
+                pass                                # already off
     except Exception:
         pass
 
 
 def run_guard_cmd(action, sources):
-    """`coach guard <on|off|status>` — 벤더 무관 단일 런타임 스위치.
+    """`coach guard <on|off|status>` — one vendor-independent runtime switch.
 
-    on/off는 플래그 파일을 토글하고, status는 현재 상태 + 지금 사용량으로 판정 미리보기.
+    on and off toggle the flag file; status reports the current state and
+    previews what would be decided against usage as it stands.
     """
     if action == "on":
         set_guard(True)
-        print("요금가드: on (플래그 생성)")
+        print("rate guard: on (flag created)")
     elif action == "off":
         set_guard(False)
-        print("요금가드: off (플래그 삭제)")
-    else:   # status (기본)
+        print("rate guard: off (flag deleted)")
+    else:   # status, the default
         state = "on" if guard_enabled() else "off"
-        print(f"요금가드: {state}")
-        # 지금이면 어떻게 판정되는지 라이브 미리보기(스위치 상태와 무관하게 항상 보여줌).
+        print(f"rate guard: {state}")
+        # A live preview of what would be decided now, shown whatever the switch says.
         try:
             reason = guard_check(sources, load_guard_config())
         except Exception:
-            reason = None                           # 조회 오류 → 미리보기 생략(fail-open)
+            reason = None                           # a query error → no preview, failing open
         if reason:
-            print(f"  지금이면 정지: {reason}")
+            print(f"  right now it would stop: {reason}")
         else:
-            print("  지금이면 통과")
+            print("  right now it would pass")
 
 
 def run_hook(sources):
-    """command Stop 훅 결정 모드(Claude 인-훅). 정지면 {continue:false,...} 1줄, 통과면 무출력.
+    """The command Stop hook's decision mode, inside Claude. A stop prints one
+    line of {continue:false,...}; a pass prints nothing. Always exits 0.
 
-    게이트 2개를 통과해야 기존 가드 판정 진행(항상 exit 0):
-      1) guard-enabled 플래그 부재 → 즉시 통과
-      2) stdin 이벤트의 stop_hook_active가 truthy 아님 → 통과(/goal 루프 턴2+에서만 발동)
+    Two gates come before the guard proper:
+      1) no guard-enabled flag → pass immediately
+      2) stop_hook_active in the stdin event is not truthy → pass, so this fires
+         only from turn two of a /goal loop onwards
     """
     if not guard_enabled():
-        return                                      # 스위치 off → 통과(무출력)
-    event = read_hook_event()                       # stdin 이벤트 소비 + 값 사용
+        return                                      # switch off → pass, printing nothing
+    event = read_hook_event()                       # consume the stdin event, and use it
     if not event.get("stop_hook_active"):
-        return                                      # 루프 턴 아님 → 통과(무출력)
+        return                                      # not a loop turn → pass, printing nothing
     reason = guard_check(sources, load_guard_config())
     if reason:
         print(json.dumps({"continue": False, "stopReason": reason}, ensure_ascii=False))
-    # 통과면 아무것도 출력하지 않는다.
+    # A pass prints nothing at all.
 
 
 def run_guard_check(sources):
-    """`coach --guard-check` — Codex 워처용 provider-중립 모드. -> exit code(int).
+    """`coach --guard-check` — the provider-neutral mode for the Codex watcher.
+    -> an exit code.
 
-    루프 게이트 없음 + guard-enabled 게이트는 적용(off면 통과).
-    출력 계약: 통과/판정불가 → exit 0 + 무출력 / 정지 → exit≠0(10) + 사유 1줄 stdout.
+    No loop gate, but the guard-enabled gate still applies: off means pass.
+    The output contract: a pass, or no decision, exits 0 and prints nothing; a
+    stop exits non-zero (10) and prints one line of reason on stdout.
     """
     if not guard_enabled():
-        return 0                                    # 스위치 off → 통과(무출력)
+        return 0                                    # switch off → pass, printing nothing
     reason = guard_check(sources, load_guard_config())
     if reason:
         print(reason)
@@ -650,34 +692,38 @@ def run_guard_check(sources):
 
 
 def _draw(text):
-    """깜빡임 없이 제자리 갱신: 커서 홈 → 줄마다 EOL까지 지우며 출력 → 아래 잔여 제거."""
+    """Redraws in place without flicker: cursor home, print each line clearing to
+    the end of it, then clear whatever is left below."""
     body = "".join(line + "\033[K\n" for line in text.split("\n"))
     sys.stdout.write("\033[H" + body + "\033[J")
     sys.stdout.flush()
 
 
 def run_watch(sources, interval):
-    """watch 모드: interval초마다 자동 갱신 + Enter로 수동 즉시 갱신, q/Ctrl-C로 종료.
+    """Watch mode: refreshes every `interval` seconds, Enter refreshes now,
+    q or Ctrl-C exits.
 
-    데이터 조회(gather)는 이전 화면이 그대로 떠 있는 상태에서 진행하고,
-    새 데이터가 준비된 뒤에만 제자리 갱신 → 갱신 때 화면이 사라지지 않음.
+    The query (gather) runs with the previous screen still up, and the redraw
+    happens only once new data is ready — so the screen never goes blank while
+    refreshing.
     """
     is_tty = sys.stdin.isatty()
-    footer = (f"\n  [{interval}초마다 자동 갱신 · Enter=지금 갱신 · q/Ctrl-C=종료]" if is_tty
-              else f"\n  [{interval}초마다 자동 갱신 · Enter=지금 갱신 · q+Enter/Ctrl-C=종료]")
-    sys.stdout.write("\033[2J\033[H  사용량 불러오는 중... "
-                     "(codexbar를 provider별로 순차 조회해서 1분쯤 걸릴 수 있어요)\033[J")
+    footer = (f"\n  [refreshes every {interval}s · Enter = refresh now · q/Ctrl-C = quit]" if is_tty
+              else f"\n  [refreshes every {interval}s · Enter = refresh now · q+Enter/Ctrl-C = quit]")
+    sys.stdout.write("\033[2J\033[H  loading usage... "
+                     "(codexbar is queried one provider at a time, so this can take a minute)\033[J")
     sys.stdout.flush()
     old_attr = None
     if is_tty:
-        # cbreak + 에코 off: Enter가 화면에 개행을 찍지 않고 바로 갱신 트리거가 된다
-        # (기존엔 canonical 모드라 에코된 개행이 커서만 내리고, 갱신 표시도 없어
-        #  동작 안 하는 것처럼 보였음). q는 Enter 없이 즉시 종료.
+        # cbreak with echo off, so Enter triggers a refresh instead of printing a
+        # newline. In canonical mode the echoed newline only moved the cursor down
+        # and nothing said a refresh had started, which read as a dead key. q
+        # quits at once, without Enter.
         old_attr = termios.tcgetattr(sys.stdin.fileno())
         tty.setcbreak(sys.stdin.fileno())
     try:
         while True:
-            frame = render(gather(sources)) + footer   # 느린 조회 동안 이전 프레임 유지
+            frame = render(gather(sources)) + footer   # the previous frame stays up through a slow query
             _draw(frame)
             r, _, _ = select.select([sys.stdin], [], [], interval)
             if r:
@@ -687,29 +733,30 @@ def run_watch(sources, interval):
                         break
                 elif sys.stdin.readline().strip().lower() == "q":
                     break
-            _draw(frame + _c("90", "  갱신 중..."))   # 조회 시작 즉시 진행 표시
+            _draw(frame + _c("90", "  refreshing..."))   # says so the moment a query starts
     except KeyboardInterrupt:
         pass
     finally:
         if old_attr is not None:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_attr)
-    print("\n종료합니다.")
+    print("\nbye.")
 
 
 def _watch_sec(v):
     try:
         iv = int(v)
     except ValueError:
-        raise argparse.ArgumentTypeError("주기는 정수(초)여야 해요")
+        raise argparse.ArgumentTypeError("the interval has to be a whole number of seconds")
     if iv < 1:
-        raise argparse.ArgumentTypeError("주기는 1초 이상이어야 해요")
+        raise argparse.ArgumentTypeError("the interval has to be at least one second")
     return iv
 
 
 def build_sources(args, p):
     """args(--mock/--file/--providers) -> sources: list[(label, kind, arg)]. kind: mock|file|live.
 
-    기존 main의 소스 결정 로직을 그대로 추출(동작 보존). 형식 오류는 p.error로 종료.
+    Lifted out of main unchanged, behaviour and all. A malformed value exits
+    through p.error.
     """
     if args.mock:
         scenarios = ["1", "2", "3", "4", "5"] if args.mock == "all" else [args.mock]
@@ -718,7 +765,7 @@ def build_sources(args, p):
         sources = []
         for spec in args.file:
             if ":" not in spec:
-                p.error(f"--file 형식은 PATH:PROVIDER 예요 (받은 값: {spec!r})")
+                p.error(f"--file takes PATH:PROVIDER (got {spec!r})")
             path, prov = spec.rsplit(":", 1)
             sources.append((prov, "file", path))
         return sources
@@ -729,50 +776,50 @@ def build_sources(args, p):
 
 
 def main():
-    p = argparse.ArgumentParser(description="codexbar 사용량 코치 — 작업 크기 권고")
+    p = argparse.ArgumentParser(description="a usage coach over codexbar — recommends a job size")
     p.add_argument("cmd", nargs="?", choices=["guard"],
-                   help="서브커맨드. 'guard' = 요금가드 런타임 스위치")
+                   help="subcommand. 'guard' is the rate guard's runtime switch")
     p.add_argument("action", nargs="?", choices=["on", "off", "status"],
-                   help="guard 액션: on|off|status (생략 시 status)")
+                   help="guard action: on|off|status (status when omitted)")
     p.add_argument("--providers", default="claude,codex,antigravity",
-                   help="라이브 조회할 provider (쉼표구분). 기본 전체")
+                   help="providers to query live, comma separated. All of them by default")
     p.add_argument("--mock", metavar="N",
-                   help="모킹 출력. '1'~'5' 또는 'all'(5종 전부) — 영상 촬영/검증용")
+                   help="mock output: '1' to '5', or 'all' for every one. For filming and checking")
     p.add_argument("--file", action="append", metavar="PATH:PROVIDER", default=[],
-                   help="JSON 파일에서 읽기 (예: samples/claude.json:claude). 반복 가능")
+                   help="read from a JSON file, e.g. samples/claude.json:claude. Repeatable")
     p.add_argument("--account", action="append", metavar="PROVIDER:LABEL", default=[],
-                   help="provider 계정 지정(codexbar --account 패스스루, 예: "
-                        "antigravity:foo@gmail.com). 반복 가능")
+                   help="name a provider's account, passed through to codexbar --account, "
+                        "e.g. antigravity:foo@gmail.com. Repeatable")
     p.add_argument("--watch", nargs="?", const=WATCH_INTERVAL, type=_watch_sec, metavar="SEC",
-                   help=f"watch 모드(주기 자동 갱신, 기본 {WATCH_INTERVAL}초). Enter=수동 갱신")
+                   help=f"watch mode, refreshing every {WATCH_INTERVAL}s by default. Enter refreshes now")
     p.add_argument("--once", action="store_true",
-                   help="한 번만 찍고 종료(watch 안 함). 기본은 watch 모드")
+                   help="print once and exit, no watching. Watch is the default")
     p.add_argument("--json", action="store_true",
-                   help="agent loop용 머신 출력(JSON 1줄, 단발). 코칭 정보 전문 포함, 색·장식 없음")
+                   help="machine output for an agent loop: one line of JSON, once. The coaching in full, no colour or decoration")
     p.add_argument("--hook", action="store_true",
-                   help="command Stop 훅 결정 모드(7일 가드). 정지면 {continue:false} 출력, 통과면 무출력")
+                   help="the command Stop hook's decision mode, on the 7-day guard. A stop prints {continue:false}, a pass prints nothing")
     p.add_argument("--guard-check", action="store_true", dest="guard_check",
-                   help="Codex 워처용 가드 체크(provider-중립). 정지면 exit≠0+사유, 통과면 exit0 무출력")
+                   help="the guard check for the Codex watcher, provider-neutral. A stop exits non-zero with a reason, a pass exits 0 silently")
     args = p.parse_args()
 
     for spec in args.account:
         if ":" not in spec:
-            p.error(f"--account 형식은 PROVIDER:LABEL 이에요 (받은 값: {spec!r})")
+            p.error(f"--account takes PROVIDER:LABEL (got {spec!r})")
         prov, label = spec.split(":", 1)
         ACCOUNT_OVERRIDES[prov] = label
 
     sources = build_sources(args, p)
 
-    # guard 서브커맨드: 런타임 스위치 on/off/status (단발).
+    # The guard subcommand: the runtime switch, on/off/status, once.
     if args.cmd == "guard":
         run_guard_cmd(args.action, sources)
-    # --hook: command Stop 훅 결정 모드(단발). 정지면 JSON 1줄, 통과면 무출력.
+    # --hook: the command Stop hook's decision mode, once. A stop prints one line of JSON, a pass nothing.
     elif args.hook:
         run_hook(sources)
-    # --guard-check: 워처용 단발. 정지면 exit≠0+사유, 통과면 exit0 무출력.
+    # --guard-check: once, for the watcher. A stop exits non-zero with a reason, a pass exits 0 silently.
     elif args.guard_check:
         sys.exit(run_guard_check(sources))
-    # --json: agent loop용 머신 출력(단발). 그 외 기본 = watch, --once면 단발 사람용.
+    # --json: machine output for an agent loop, once. Otherwise watch by default, or one human-readable print with --once.
     elif args.json:
         print(json.dumps(to_payload(gather(sources)), ensure_ascii=False, separators=(",", ":")))
     elif args.once:

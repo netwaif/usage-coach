@@ -1,55 +1,89 @@
-# 1부 사용량 코치 — 핵심 로직 명세 (구현용)
+# Part one, the usage coach — the core logic, for implementation
 
-확정 2026-06-25 (사용자). 입력 스키마 = `usage-schema.md`. 샘플 = `usage-samples/`.
+Settled 2026-06-25 by the author. Input schema: `usage-schema.md`. Samples:
+`usage-samples/`.
 
-## 한 줄 요약
-codexbar 사용량 데이터를 해석해 **"지금 어떤 크기의 작업을 돌리면 되는지 + 왜 + (필요시) 언제"** 를 알려준다. 단순 정보 표시가 아니라 **행동 권고**가 출력. (이 '해석→행동' 레이어가 기존 도구에 없는 갭.)
+## In one line
 
-## 입력 (provider별, windowMinutes로 윈도우 분류)
-각 윈도우에서 두 값만 뽑는다:
-- `left` = 남은 사용량 비율 = (100 − usedPercent) / 100
-- `timeLeft` = 초기화까지 남은 시간 비율 = minutesToReset / windowMinutes
-  (절대 분 `minutesToReset` = resetsAt − now 도 같이 보관 — "곧 초기화" 판정용)
+It reads codexbar's usage data and says **what size of job to run now, why, and
+when it matters**. The output is a recommended action, not a readout — and that
+interpret-then-advise layer is the gap no existing tool fills.
 
-윈도우 종류(windowMinutes):
-- **소진형**: 5시간(300), 일일(1440·Gemini). "초기화되면 사라짐 → 남기면 손해."
-- **페이스형**: 7일(10080). "오래 끌고 가야 함 → 속도 관리."
+## Input (per provider, windows classified by windowMinutes)
 
-무효 가드: resetsAt가 epoch(1970)/비정상 → 그 윈도우 스킵. (Gemini primary)
+Two values are taken from each window:
 
-## 코어 비교 (모든 윈도우 공통)
-`left` 와 `timeLeft` 를 견준다:
-- `left > timeLeft + m` → 시간 안에 다 못 씀 = **남길 것 같다 → 더 쓸 여지**
-- `left < timeLeft − m` → **빠듯 → 아껴야**
-- 그 사이 → 딱 맞음
-(`m` = 여유 마진, 초기 0.10. 튜닝값)
+- `left` = the fraction of usage remaining = (100 − usedPercent) / 100
+- `timeLeft` = the fraction of the window still to run = minutesToReset / windowMinutes
+  (the absolute `minutesToReset` = resetsAt − now is kept too, for deciding
+  whether a reset is imminent)
 
-→ 이 단일 비교가 "초기화 임박 자동 감지"를 대신함. 고정 "1시간 전" 기준 불필요.
+Kinds of window, by windowMinutes:
 
-## 출력 = 작업 크기 추천 (5h + 7d 조합)
-판정 순서(위에서부터, 먼저 걸리는 것):
+- **Burst**: 5 hours (300), daily (1440, Gemini). "It disappears at the reset, so
+  leaving it unused is a loss."
+- **Pace**: 7 days (10080). "It has to last, so manage the rate."
 
-| # | 조건 | 메시지 | 색 |
+Invalid-data guard: a resetsAt at the epoch (1970) or otherwise nonsensical means
+that window is skipped. (Gemini's primary.)
+
+## The core comparison (the same for every window)
+
+`left` against `timeLeft`:
+
+- `left > timeLeft + m` → you will not get through it in time = **likely to leave
+  some, so there is room to spend more**
+- `left < timeLeft − m` → **tight, so go carefully**
+- between the two → about right
+
+(`m` is the slack margin, 0.10 to begin with. A tuning value.)
+
+That single comparison replaces any "detect an imminent reset" rule — no fixed
+"one hour before" threshold is needed.
+
+## Output: a recommended job size (5h and 7d together)
+
+Decided from the top, first match winning:
+
+| # | condition | message | colour |
 |---|---|---|---|
-| 1 | **7일이 빠듯** (seven.left < seven.timeLeft − m) | "7일 한도가 빠듯해요. 큰 작업은 미루고 꼭 필요한 것만." + (절충 옵션: 7일 거의 안 먹는 가벼운 것만) | 🔴 |
-| 2 | 7일 OK + **5h 넉넉** (five.left ≥ T_big) | "지금이 기회예요. 큰 작업 돌리세요." | 🟢 |
-| 3 | 7일 OK + 5h 부족 + **초기화 임박** (five.minutesToReset ≤ T_soon) | "조금만 기다리면 5시간이 초기화돼요. 잠깐 뒤 큰 작업 돌리면 딱이에요." | ⏳ |
-| 4 | 7일 OK + 5h 부족 + 초기화 멀음 | "큰 작업은 5시간 한도에 걸려 중간에 끊겨요. 작은 작업으로 돌리세요." | 🟡 |
-| 5 | 그 외(다 보통) | "여유 있어요. 평소대로 쓰세요." | ⚪ |
+| 1 | **the week is tight** (seven.left < seven.timeLeft − m) | "The 7-day limit is tight. Hold the big jobs and run only what you must." Plus, as a middle option, light work that barely touches the week | 🔴 |
+| 2 | the week is fine and **5h is roomy** (five.left ≥ T_big) | "This is the moment. Run the big job." | 🟢 |
+| 3 | the week is fine, 5h short, **reset imminent** (five.minutesToReset ≤ T_soon) | "Wait a little and the 5 hours reset. A big job straight after fits perfectly." | ⏳ |
+| 4 | the week is fine, 5h short, reset far off | "A big job will hit the 5-hour limit and be cut off part way. Keep them small." | 🟡 |
+| 5 | anything else (all unremarkable) | "There is room. Carry on as usual." | ⚪ |
 
-**핵심 원칙(충돌 해소)**: 무슨 작업이든 5h·7d를 동시에 깎으므로, **둘 중 더 빡빡한 쪽이 작업 크기 상한**. 그래서 7일 빠듯(#1)이 5h 여유보다 우선. ("쿠폰 만료 아까워도 주 예산이 병목.")
+**The principle that resolves conflicts**: any job draws down 5h and 7d at once,
+so **whichever of the two is tighter sets the ceiling on job size**. That is why a
+tight week (#1) outranks a roomy 5h — a coupon going to waste is a shame, but the
+weekly budget is the bottleneck.
 
-**메시지 3원칙**: ①권장 작업 크기 ②이유("5시간 한도에 걸려 끊겨서") ③타이밍("조금 뒤에"). 이유·타이밍이 이 기능의 차별점 — 빼면 단순 정보 던지기로 전락.
+**The three principles for a message**: ① the recommended job size, ② the reason
+("because it will hit the 5-hour limit and be cut off"), ③ the timing ("in a
+little while"). The reason and the timing are what distinguish this feature —
+drop them and it is just another readout.
 
-## 튜닝 파라미터 (초기값, 사용 패턴 따라 조정)
-- `m` 페이스 마진 = 0.10
-- `T_big` 큰 작업 돌릴 5h 잔량 하한 = 0.40 (큰 작업 1회가 5h의 ~30% 소비 가정 + 버퍼). **사용자 실제 큰 작업 1회 소비량으로 보정 권장.**
-- `T_soon` "초기화 임박" 분 = 30 (또는 동적: 큰 작업 예상 소요시간 미만)
+## Tuning (initial values, to be adjusted to how you work)
 
-## Provider별 처리
-- **Claude/Codex(5h+7d)**: 위 로직 그대로. (주력)
-- **Gemini(일일×3, 별도계정)**: 일일=소진형으로 #2~#4의 "5h" 자리에 대입(7d 페이스 없음 → #1 스킵). secondary/tertiary 동일 reset이면 묶어 1개로. primary(epoch) 가드.
-- 출력은 provider별로 따로 + (선택) 전체 종합 한 줄.
+- `m`, the pace margin = 0.10
+- `T_big`, the 5h floor below which a big job is not worth starting = 0.40,
+  assuming one big job consumes about 30% of the 5h, plus a buffer. **Worth
+  recalibrating against what one of your own big jobs actually costs.**
+- `T_soon`, the minutes within which a reset is "imminent" = 30 (or, dynamically,
+  less than a big job is expected to take)
 
-## 트랙B 연결 (2부)
-이 권고 분류를 agent loop 요금가드가 소비 → '무조건 종료' 대신 #1~#5 케이스별 정책(예: #1이면 큰 작업 거절/축소, #3이면 reset까지 대기, 경계는 사용자 confirm). mat에도 반영.
+## Per provider
+
+- **Claude/Codex (5h+7d)**: exactly the logic above. These are the main ones.
+- **Gemini (three daily windows, a separate account)**: daily is a burst window
+  and takes the "5h" place in #2 through #4. With no 7-day pace, #1 is skipped.
+  A secondary and tertiary sharing a reset are folded into one. The primary
+  (epoch) is guarded against.
+- The output is per provider, plus an optional overall line.
+
+## Where track B connects (part two)
+
+The agent-loop rate guard consumes this classification, so instead of an
+unconditional stop it can have a policy per case #1 to #5 — refuse or shrink a big
+job at #1, wait for the reset at #3, ask the user at the boundary. mat picks this
+up too.

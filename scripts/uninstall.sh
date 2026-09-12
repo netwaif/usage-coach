@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# usage-coach 대시보드 LaunchAgent 제거 — install.sh 의 대응 제거 경로
+# Removes the usage-coach dashboard's LaunchAgent — the counterpart to install.sh
 set -euo pipefail
 OS_NAME="${HARNESS_OS:-$(uname -s)}"
 if [[ "$OS_NAME" == "Linux" ]]; then
@@ -10,7 +10,7 @@ if [[ "$OS_NAME" == "Linux" ]]; then
   fi
   rm -f "$UNIT_DIR/$SVC.service" "$UNIT_DIR/$SVC.timer"
   if [[ "${DRY_RUN:-0}" != "1" ]]; then systemctl --user daemon-reload 2>/dev/null || true; fi
-  echo "제거됨: $UNIT_DIR/$SVC.{service,timer} (설정 ~/.config/usage-coach/ 은 보존)"
+  echo "removed: $UNIT_DIR/$SVC.{service,timer} (the config in ~/.config/usage-coach/ is kept)"
   exit 0
 fi
 LABEL="com.usage-coach.dashboard"
@@ -19,4 +19,4 @@ if [[ "${DRY_RUN:-0}" != "1" ]]; then
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 fi
 rm -f "$PLIST"
-echo "제거됨: $PLIST (설정 ~/.config/usage-coach/ 은 보존)"
+echo "removed: $PLIST (the config in ~/.config/usage-coach/ is kept)"
